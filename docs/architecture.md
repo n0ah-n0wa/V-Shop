@@ -105,6 +105,35 @@ Customers reach the private reviews group through an invite link the bot resolve
 on demand (or `REVIEW_INVITE_LINK` verbatim). The group's chat ID never appears
 in anything sent to a user. Links are cached in-process for an hour.
 
+## Loyalty persistence
+
+The stamp card, the roulette and the referral programme share one persistence
+layer; the tables are described in [database-schema.md](database-schema.md#loyalty).
+
+| Service | Owns |
+|---|---|
+| `LoyaltyService` (`app/services/loyalty.py`) | accounts, the stamp ledger, free-bottle redemption |
+| `RouletteService` (`app/services/roulette.py`) | spin grants, and spending a grant on a prize |
+| `RewardService` (`app/services/reward.py`) | listing rewards, binding one to an order |
+| `ReferralService` (`app/services/referral.py`) | referral codes, attribution, qualification |
+
+Three rules hold it together:
+
+1. **Lock the customer's account first.** Every mutation starts with
+   `LoyaltyService.lock_account` — `SELECT … FOR UPDATE` on the customer's
+   `loyalty_accounts` row, refreshing the ORM instance — which serialises one
+   customer's loyalty operations inside PostgreSQL.
+2. **Idempotency comes from the schema.** Each earning event is tied to its
+   source row (order, referral, spin, reward) by a unique constraint. Replaying
+   it returns the original row with `created=False` instead of booking it twice.
+3. **Validate before writing; never commit.** A refused operation leaves nothing
+   behind, and the caller's transaction decides when the work becomes durable.
+
+Business rules — how many stamps an order earns, prize weights, who qualifies —
+are not decided in this layer; callers pass the amounts in. SQLite cannot prove
+the locking (it ignores `FOR UPDATE`), so `tests/test_loyalty_postgres.py`
+races real transactions on PostgreSQL when `VSHOP_TEST_POSTGRES_URL` is set.
+
 ## Routing
 
 ```text

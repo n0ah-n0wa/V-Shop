@@ -26,15 +26,19 @@ import json
 import sys
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, text
+from sqlalchemy import exists, func, inspect, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import get_settings
 from app.models.cart import Cart, CartItem
 from app.models.category import Category, Subcategory
-from app.models.enums import OrderStatus
+from app.models.enums import OrderStatus, SpinGrantReason
+from app.models.loyalty import LoyaltyAccount, LoyaltyTransaction
 from app.models.order import Order, OrderItem
 from app.models.product import Product
+from app.models.referral import Referral
+from app.models.reward import UserReward
+from app.models.roulette import RouletteSpin, RouletteSpinGrant
 from app.models.user import User
 from app.services.cart import CartService
 from app.services.catalog import CatalogService
@@ -46,6 +50,54 @@ from app.utils.statistics_display import format_statistics
 LANGUAGE = "en"
 
 
+async def _has_table(session: AsyncSession, name: str) -> bool:
+    return bool(await session.run_sync(lambda sync: inspect(sync.connection()).has_table(name)))
+
+
+async def _loyalty_health(session: AsyncSession) -> dict[str, int]:
+    """Counts that must all be 0 once the loyalty migration has run."""
+    ledger_totals = (
+        select(
+            LoyaltyTransaction.user_id.label("user_id"),
+            func.sum(LoyaltyTransaction.amount).label("total"),
+        )
+        .group_by(LoyaltyTransaction.user_id)
+        .subquery()
+    )
+    return {
+        "users_without_account": int(
+            await session.scalar(
+                select(func.count())
+                .select_from(User)
+                .where(~exists().where(LoyaltyAccount.user_id == User.id))
+            )
+            or 0
+        ),
+        "users_without_welcome_spin": int(
+            await session.scalar(
+                select(func.count())
+                .select_from(User)
+                .where(
+                    ~exists().where(
+                        RouletteSpinGrant.user_id == User.id,
+                        RouletteSpinGrant.reason == SpinGrantReason.INITIAL_PROMO,
+                    )
+                )
+            )
+            or 0
+        ),
+        "balances_disagreeing_with_ledger": int(
+            await session.scalar(
+                select(func.count())
+                .select_from(LoyaltyAccount)
+                .outerjoin(ledger_totals, ledger_totals.c.user_id == LoyaltyAccount.user_id)
+                .where(LoyaltyAccount.stamp_balance != func.coalesce(ledger_totals.c.total, 0))
+            )
+            or 0
+        ),
+    }
+
+
 async def collect(session: AsyncSession) -> dict[str, object]:
     settings = get_settings()
     report: dict[str, object] = {}
@@ -54,7 +106,7 @@ async def collect(session: AsyncSession) -> dict[str, object]:
     async def count(model: type) -> int:
         return int(await session.scalar(select(func.count()).select_from(model)) or 0)
 
-    report["db"] = {
+    db: dict[str, int] = {
         "users": await count(User),
         "categories": await count(Category),
         "subcategories": await count(Subcategory),
@@ -64,6 +116,23 @@ async def collect(session: AsyncSession) -> dict[str, object]:
         "orders": await count(Order),
         "order_items": await count(OrderItem),
     }
+    # A deploy whose loyalty migration did not run must still get the rest of
+    # the report, so a missing schema is reported, not raised.
+    if await _has_table(session, LoyaltyAccount.__tablename__):
+        db.update(
+            {
+                "loyalty_accounts": await count(LoyaltyAccount),
+                "loyalty_transactions": await count(LoyaltyTransaction),
+                "roulette_spin_grants": await count(RouletteSpinGrant),
+                "roulette_spins": await count(RouletteSpin),
+                "user_rewards": await count(UserReward),
+                "referrals": await count(Referral),
+            }
+        )
+        report["loyalty"] = await _loyalty_health(session)
+    else:
+        report["loyalty"] = {"schema": "missing: migration 3b9d6f2a8c14 is not applied"}
+    report["db"] = db
     report["order_status_counts"] = {
         status.value: int(
             await session.scalar(

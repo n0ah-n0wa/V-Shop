@@ -16,11 +16,17 @@ from app.models import (  # noqa: F401 — register models on metadata
     Cart,
     CartItem,
     Category,
+    LoyaltyAccount,
+    LoyaltyTransaction,
     Order,
     OrderItem,
     Product,
+    Referral,
+    RouletteSpin,
+    RouletteSpinGrant,
     Subcategory,
     User,
+    UserReward,
 )
 
 config = context.config

@@ -7,6 +7,10 @@ PostgreSQL schema is managed by Alembic.
 | `a9b389353e68` | Initial tables |
 | `b2c4d5e6f7a8` | Performance indexes |
 | `c7e1f4a9d3b6` | Catalog hierarchy: `subcategories`, localized names, `uk` columns |
+| `d4f2a8c1b9e3` | `orders.payment_method` |
+| `e5a3c7d21f04` | Statistics index on `order_items` |
+| `f6b1d4e8a207` | Drop two indexes made redundant by composites |
+| `3b9d6f2a8c14` | Loyalty foundation: accounts, stamp ledger, roulette, rewards, referrals |
 
 ```bash
 alembic upgrade head
@@ -164,11 +168,154 @@ including `count(*) WHERE status = ?` as an index-only scan.
 
 Indexes: `order_id`, composite `(product_id, order_id)`.
 
+## Loyalty
+
+Persistence for the stamp card, the roulette and the referral programme
+(`3b9d6f2a8c14`). Six tables; every foreign key is `ON DELETE RESTRICT`, so
+loyalty history is never cascade-deleted.
+
+```text
+users 1──1 loyalty_accounts
+users 1──* loyalty_transactions ──► orders | referrals | roulette_spins | user_rewards
+users 1──* roulette_spin_grants 1──0..1 roulette_spins 1──0..1 user_rewards
+users 1──* user_rewards ──0..1 orders           ← the order a reward was used on
+users 1──* referrals (as referrer) · users 1──0..1 referrals (as referred)
+```
+
+Two rules hold the design together:
+
+- **The ledger is the source of truth.** `loyalty_accounts.stamp_balance` is a
+  cache written in the same flush as each `loyalty_transactions` row, and every
+  row records `balance_after`. Both are CHECKed non-negative, so any balance can
+  be explained row by row.
+- **Idempotency is structural.** Every earning or spending event references the
+  row that caused it, and a unique constraint on that reference means it can be
+  booked at most once: one purchase row per order, one referral row per referral
+  and side, one row per spin, one per redeemed reward; one welcome spin per
+  customer, one milestone spin per order, one spin per grant, one reward per order.
+- **Ownership is checked by the database.** `roulette_spins`, `user_rewards` and
+  `loyalty_transactions` reference their grant, spin or reward by
+  `(id, user_id)`, so a row can never point at another customer's entitlement.
+  References to `orders` and `referrals` are ownership-checked by the services —
+  enforcing them here would need new constraints on the existing `orders` table.
+
+Every mutation of a customer's loyalty state locks that customer's
+`loyalty_accounts` row first (`SELECT … FOR UPDATE`); see
+`app/services/loyalty.py`.
+
+### `loyalty_accounts`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | serial PK | |
+| `user_id` | int FK → users | Unique; `ON DELETE RESTRICT` |
+| `stamp_balance` | int | `>= 0`; cached ledger total |
+| `qualifying_purchase_count` | int | `>= 0`; completed paid orders booked — drives the every-Nth-purchase spin |
+| `referral_code` | varchar(32) | Nullable, unique; random, assigned on first use |
+| `created_at` / `updated_at` | timestamptz | |
+
+Indexes: unique `user_id`; unique constraint on `referral_code`.
+
+### `loyalty_transactions`
+
+The stamp ledger. Append-only.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | serial PK | |
+| `user_id` | int FK → users | |
+| `kind` | varchar(32) | `purchase` / `referral` / `roulette` / `redemption` / `adjustment` |
+| `amount` | int | Signed: `purchase` ≥ 0 (an order below the threshold books 0), `referral` and `roulette` > 0, `redemption` < 0, `adjustment` ≠ 0 |
+| `balance_after` | int | `>= 0`; running balance after this row |
+| `order_id` | int FK → orders | Set only for `purchase`; unique |
+| `referral_id` | int FK → referrals | Set only for `referral`; unique together with `user_id` |
+| `spin_id` | int FK → roulette_spins | Set only for `roulette`; unique |
+| `reward_id` | int FK → user_rewards | Set only for `redemption`; unique |
+| `note` | varchar(255) | Required for `adjustment` |
+| `created_at` | timestamptz | |
+
+Indexes: composite `(user_id, id)` — a customer's history, newest first; the four unique source references above.
+
+### `roulette_spin_grants`
+
+A spin a customer is entitled to; available while `consumed_at` is NULL.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | serial PK | |
+| `user_id` | int FK → users | |
+| `reason` | varchar(32) | `initial_promo` / `purchase_milestone` / `referral` |
+| `order_id` | int FK → orders | Set only for `purchase_milestone`; unique |
+| `referral_id` | int FK → referrals | Set only for `referral`; unique together with `user_id` |
+| `consumed_at` | timestamptz | NULL until spent |
+| `created_at` | timestamptz | When granted |
+
+Indexes: composite `(user_id, consumed_at)`; partial unique `user_id` where `reason = 'initial_promo'` — one welcome spin per customer.
+
+### `roulette_spins`
+
+Permanent spin history, with a snapshot of the prize so later configuration
+changes never rewrite it.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | serial PK | |
+| `user_id` | int FK → users | |
+| `grant_id` | int FK → roulette_spin_grants | Unique — a grant is spent once, and only by its owner (`(grant_id, user_id)` references `(id, user_id)`) |
+| `prize_code` | varchar(32) | Prize id at the time of the spin |
+| `prize_type` | varchar(32) | `stamps` / `discount_percent` / `free_bottle` |
+| `prize_value` | int | `> 0` |
+| `created_at` | timestamptz | |
+
+Indexes: `user_id`.
+
+### `user_rewards`
+
+Discounts and free bottles held until the customer uses one at checkout. No
+expiry. A reward used on an order that is later cancelled stays `used`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | serial PK | |
+| `user_id` | int FK → users | |
+| `kind` | varchar(32) | `discount_percent` / `free_bottle` |
+| `value` | int | Percent 1–100 for a discount; `1` for a free bottle |
+| `max_item_price` | numeric(10,2) | Free bottle only: the most expensive product it covers, snapshotted when issued |
+| `source` | varchar(32) | `stamp_card` / `roulette` |
+| `status` | varchar(32) | `available` / `used` |
+| `spin_id` | int FK → roulette_spins | Set only for `roulette` rewards; unique |
+| `order_id` | int FK → orders | The order it was used on; unique — one reward per order |
+| `used_at` | timestamptz | Set together with `order_id` |
+| `created_at` | timestamptz | |
+
+Indexes: composite `(user_id, status)`; unique `spin_id`, unique `order_id`.
+
+### `referrals`
+
+Attributed as `pending` when a new customer arrives through a referral link;
+`qualified` at that customer's first completed paid order.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | serial PK | |
+| `referrer_user_id` | int FK → users | |
+| `referred_user_id` | int FK → users | Unique — one referrer per customer, never changed |
+| `status` | varchar(32) | `pending` / `qualified` |
+| `qualifying_order_id` | int FK → orders | Set on qualification; unique |
+| `qualified_at` | timestamptz | Set together with `qualifying_order_id` |
+| `created_at` | timestamptz | When attributed |
+
+CHECK: `referrer_user_id <> referred_user_id`.
+
+Indexes: `referrer_user_id`; unique `referred_user_id`, unique `qualifying_order_id`.
+
 ## Status & enum values
 
 Every enum is stored **by value** as a plain `VARCHAR` (`native_enum=False`, with
 no `CHECK` constraint). That is why adding `Shipped`, `uk` and the payment
 methods needed no migration — and why a value must be written exactly as listed.
+The loyalty values additionally appear inside the tables' consistency CHECKs, so
+a new value that needs its own source column requires a migration.
 
 | Enum | Column | Values |
 |---|---|---|
@@ -176,6 +323,13 @@ methods needed no migration — and why a value must be written exactly as liste
 | City | `users.selected_city` | `berlin`, `delivery` |
 | Order status | `orders.status` | `New`, `Accepted`, `Shipped`, `Completed`, `Cancelled` |
 | Payment method | `orders.payment_method` | `cash`, `card` — nullable, so orders placed before the column existed keep `NULL` |
+| Ledger entry kind | `loyalty_transactions.kind` | `purchase`, `referral`, `roulette`, `redemption`, `adjustment` |
+| Spin grant reason | `roulette_spin_grants.reason` | `initial_promo`, `purchase_milestone`, `referral` |
+| Prize type | `roulette_spins.prize_type` | `stamps`, `discount_percent`, `free_bottle` |
+| Reward kind | `user_rewards.kind` | `discount_percent`, `free_bottle` |
+| Reward source | `user_rewards.source` | `stamp_card`, `roulette` |
+| Reward status | `user_rewards.status` | `available`, `used` |
+| Referral status | `referrals.status` | `pending`, `qualified` |
 
 ### Order status transitions
 
@@ -204,10 +358,14 @@ New ──► Accepted ──► Shipped ──► Completed   (terminal)
   one) its subcategory are all active. The rule lives in one place,
   `app/repositories/visibility.py`, and is used by catalog browsing, the checkout
   guard, and the statistics rankings alike.
+- Loyalty rows are never cascade-deleted: every loyalty foreign key is
+  `RESTRICT`, and `users` / `orders` rows referenced by them cannot be deleted.
+- A stamp balance can never go negative, and every ledger row carries exactly the
+  source reference its `kind` requires — both enforced by CHECK constraints.
 
 ## Migrations
 
-Six, linear and single-headed. See
+Seven, linear and single-headed. See
 [deployment.md](deployment.md#migrations) for what each one does and which
 downgrades are data-safe. No `upgrade()` in this project drops a table, drops a
 column, truncates, or deletes rows — enforced by `tests/test_migrations.py`.

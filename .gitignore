@@ -45,3 +45,6 @@ Thumbs.db
 
 # Docker volumes / local data
 pgdata/
+# Database dumps hold real customer data; .env backups hold secrets.
+*.dump
+.env.backup*
