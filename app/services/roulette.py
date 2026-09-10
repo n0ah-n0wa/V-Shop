@@ -26,14 +26,15 @@ from app.models.enums import (
     SpinGrantReason,
 )
 from app.models.loyalty import LoyaltyTransaction
-from app.models.order import Order
-from app.models.referral import Referral
 from app.models.reward import UserReward
 from app.models.roulette import RouletteSpin, RouletteSpinGrant
+from app.repositories.order import OrderRepository
+from app.repositories.referral import ReferralRepository
 from app.repositories.roulette_spin import RouletteSpinRepository
 from app.repositories.roulette_spin_grant import RouletteSpinGrantRepository
 from app.repositories.user_reward import UserRewardRepository
-from app.services.loyalty import LoyaltyService, to_money
+from app.services.loyalty import LoyaltyError, LoyaltyService
+from app.utils.validators import to_money
 
 PRIZE_CODE_MAX_LENGTH = 32
 
@@ -44,7 +45,7 @@ _REWARD_FOR_PRIZE = {
 }
 
 
-class InvalidPrizeError(ValueError):
+class InvalidPrizeError(LoyaltyError):
     """Raised before any write when a prize could not be persisted as given."""
 
 
@@ -109,6 +110,8 @@ class RouletteService:
         self.grants = RouletteSpinGrantRepository(session)
         self.spins = RouletteSpinRepository(session)
         self.rewards = UserRewardRepository(session)
+        self.orders = OrderRepository(session)
+        self.referrals = ReferralRepository(session)
         self.loyalty = LoyaltyService(session)
 
     # --- granting -----------------------------------------------------------------
@@ -125,7 +128,7 @@ class RouletteService:
         self, user_id: int, *, order_id: int
     ) -> SpinGrantResult:
         """A spin earned by the order that reached a purchase milestone. Once per order."""
-        order = await self.session.get(Order, order_id)
+        order = await self.orders.get_by_id(order_id)
         if order is None or order.user_id != user_id:
             raise ValueError(f"Order {order_id} does not belong to user {user_id}")
         return await self._grant(
@@ -137,7 +140,7 @@ class RouletteService:
 
     async def grant_referral_spin(self, user_id: int, *, referral_id: int) -> SpinGrantResult:
         """A spin earned through a referral. Once per referral and recipient."""
-        referral = await self.session.get(Referral, referral_id)
+        referral = await self.referrals.get_by_id(referral_id)
         if referral is None or user_id not in (
             referral.referrer_user_id,
             referral.referred_user_id,

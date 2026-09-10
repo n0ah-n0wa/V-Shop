@@ -158,9 +158,16 @@ It exists to separate two incidents that look identical to a user:
 
 The report covers users, categories, subcategories, products, carts, orders and
 their statuses, historical totals, and the rendered statistics dashboard. Its
-`loyalty` section counts users without a loyalty account, users without their
-welcome spin, and accounts whose cached balance disagrees with the stamp ledger —
-after the loyalty migration (`3b9d6f2a8c14`) all three must be `0`.
+`loyalty` section has two parts:
+
+- `integrity` — cached balances or purchase counts the stamp ledger does not
+  explain, ledger rows whose running balance is wrong, stamp-card rewards
+  without their debit, spin grants out of step with their spins. The bot never
+  produces any of these, so every value must be `0`; anything else means rows
+  were changed outside it, and the ledger is the record to trust.
+- `coverage` — users without a loyalty account or welcome spin. Both are `0`
+  right after the loyalty migration (`3b9d6f2a8c14`), then grow with new
+  sign-ups until onboarding grants them; accounts are created on first use.
 
 ## Safe operations
 
@@ -231,7 +238,7 @@ docker exec vshop-db dropdb -U vshop restore_check
 | `docker volume rm <name>` | Same, targeted at one volume. |
 | `docker volume prune` | Deletes **every** unreferenced volume on the host. `docker compose down` leaves the database volume unreferenced, so this destroys it. |
 | `docker system prune -a --volumes` | As above, plus images. |
-| `alembic downgrade …` | **Depends on the target — see [Migrations](#migrations) below.** Three of the seven (`b2c4d5e6f7a8`, `e5a3c7d21f04`, `f6b1d4e8a207`) only touch indexes and are safe; the others drop columns or tables. |
+| `alembic downgrade …` | **Depends on the target — see [Migrations](#migrations) below.** Three of the nine (`b2c4d5e6f7a8`, `e5a3c7d21f04`, `f6b1d4e8a207`) only touch indexes and are safe; the others drop columns or tables. |
 
 Because `docker compose down` leaves `pgdata` dangling, do not schedule any
 Docker cleanup job on this host. If disk reclamation is genuinely needed, scope
@@ -240,7 +247,7 @@ it — `docker image prune` is safe; volume pruning is not.
 ## Migrations
 
 The bot container runs `alembic upgrade head` before it starts polling, so a
-deploy always brings the schema forward. Seven migrations exist; the chain is
+deploy always brings the schema forward. Nine migrations exist; the chain is
 linear and single-headed.
 
 | Revision | What `upgrade()` does | Is `downgrade()` data-safe? |
@@ -252,6 +259,8 @@ linear and single-headed.
 | `e5a3c7d21f04` | adds `(product_id, order_id)` on `order_items`, drops the superseded single-column index | Yes — indexes only |
 | `f6b1d4e8a207` | drops two indexes made redundant by composites | Yes — indexes only |
 | `3b9d6f2a8c14` | loyalty foundation: six new tables (accounts, stamp ledger, roulette grants and spins, rewards, referrals); backfills one account and one welcome spin per existing user; touches no existing table | **Guarded.** With only the backfill present it loses nothing a re-upgrade would not recreate. Once customers have loyalty activity it **refuses**; `alembic -x allow_loyalty_data_loss=true downgrade f6b1d4e8a207` then drops every stamp, spin, reward and referral — take a `pg_dump` first |
+| `8e4c1a7b2d95` | adds `orders.loyalty_eligible` (`NOT NULL DEFAULT false`, instant on PostgreSQL 11+); every existing order reads `false` and never earns stamps, orders placed afterwards are eligible | **Guarded.** Refuses while eligible orders exist — a re-upgrade would mark them all ineligible; `-x allow_loyalty_data_loss=true` overrides |
+| `c5d2e8f1a6b3` | adds `user_rewards.discount_amount` and `redeemed_product_id` (both nullable, plus a consistency CHECK); touches no catalog, order or user table | **Guarded.** Refuses while used rewards exist — their redemption record would be lost; `-x allow_loyalty_data_loss=true` overrides |
 
 **No `upgrade()` in this project drops a table, drops a column, truncates, or
 deletes rows.** Backfills are `INSERT`/`UPDATE` only. That rule is enforced by

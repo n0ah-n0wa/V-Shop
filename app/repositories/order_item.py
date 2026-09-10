@@ -31,6 +31,19 @@ class OrderItemRepository(BaseRepository[OrderItem]):
         result = await self.session.scalars(stmt)
         return list(result.all())
 
+    async def has_unit_at_price(self, order_id: int, product_id: int, price: Decimal) -> bool:
+        """Whether the order holds ``product_id`` at exactly ``price`` — e.g. a free unit."""
+        found = await self.session.scalar(
+            select(OrderItem.id)
+            .where(
+                OrderItem.order_id == order_id,
+                OrderItem.product_id == product_id,
+                OrderItem.price == price,
+            )
+            .limit(1)
+        )
+        return found is not None
+
     async def add_item(
         self,
         *,

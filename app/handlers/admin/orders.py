@@ -10,6 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings
 from app.filters.localized_text import LocalizedText
 from app.keyboards.admin import admin_cancel_keyboard, admin_menu_keyboard
 from app.keyboards.admin_orders import (
@@ -434,6 +435,7 @@ async def change_order_status(
     i18n: LocalizationService,
     session: AsyncSession,
     bot: Bot,
+    settings: Settings,
 ) -> None:
     if callback.message is None or callback.data is None:
         await callback.answer()
@@ -446,7 +448,8 @@ async def change_order_status(
         return
 
     order_id, new_status, list_kind, page = parsed
-    admin = AdminService(session)
+    # Settings carry the configured stamp-card rules to order completion.
+    admin = AdminService(session, settings=settings)
     order = await admin.get_order(order_id)
     if order is None:
         await callback.answer(i18n.t("admin.order_not_found"), show_alert=True)

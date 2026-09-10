@@ -1,6 +1,7 @@
 """Application configuration loaded from environment variables."""
 
 import json
+from decimal import Decimal
 from functools import lru_cache
 from typing import Annotated
 
@@ -82,6 +83,34 @@ class Settings(BaseSettings):
             "Currency shown next to money figures. Placement follows the "
             "language: '€12.34' in English, '12,34 €' in German/Russian/Ukrainian."
         ),
+    )
+    # Money settings carry Numeric(10, 2) precision, so a value the stamp card
+    # could not use (20.005, 0.001) stops the bot at startup, not at the first
+    # completed order.
+    loyalty_stamp_purchase_threshold: Decimal = Field(
+        default=Decimal("20.00"),
+        # At least €1: a mistyped threshold (0.2 for 20) would mint stamps on
+        # every order, and the floor keeps one order's stamps within the
+        # ledger's 32-bit amount column.
+        ge=Decimal("1.00"),
+        max_digits=10,
+        decimal_places=2,
+        description=(
+            "Charged order total that earns one stamp, in whole multiples: "
+            "€20 → 1, €39.99 → 1, €40 → 2."
+        ),
+    )
+    loyalty_stamps_required: int = Field(
+        default=10,
+        ge=1,
+        description="Stamps that unlock one free bottle.",
+    )
+    loyalty_free_bottle_max_price: Decimal = Field(
+        default=Decimal("20.00"),
+        gt=0,
+        max_digits=10,
+        decimal_places=2,
+        description="Most expensive product a free bottle may cover.",
     )
     app_env: str = Field(default="development", description="Application environment name")
     log_level: str = Field(default="INFO", description="Root logging level")

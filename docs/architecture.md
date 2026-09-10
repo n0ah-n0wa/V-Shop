@@ -112,7 +112,7 @@ layer; the tables are described in [database-schema.md](database-schema.md#loyal
 
 | Service | Owns |
 |---|---|
-| `LoyaltyService` (`app/services/loyalty.py`) | accounts, the stamp ledger, free-bottle redemption |
+| `LoyaltyService` (`app/services/loyalty.py`) | accounts, the stamp ledger, exchanging stamps for a free-bottle reward |
 | `RouletteService` (`app/services/roulette.py`) | spin grants, and spending a grant on a prize |
 | `RewardService` (`app/services/reward.py`) | listing rewards, binding one to an order |
 | `ReferralService` (`app/services/referral.py`) | referral codes, attribution, qualification |
@@ -129,10 +129,58 @@ Three rules hold it together:
 3. **Validate before writing; never commit.** A refused operation leaves nothing
    behind, and the caller's transaction decides when the work becomes durable.
 
-Business rules — how many stamps an order earns, prize weights, who qualifies —
-are not decided in this layer; callers pass the amounts in. SQLite cannot prove
-the locking (it ignores `FOR UPDATE`), so `tests/test_loyalty_postgres.py`
-races real transactions on PostgreSQL when `VSHOP_TEST_POSTGRES_URL` is set.
+Refusals a customer can cause — `InsufficientStampsError`, `StaleCardError`,
+the `Reward*Error`s, `InvalidPrizeError`, `SelfReferralError`,
+`ReferralLoopError` — derive from `LoyaltyError` (a `ValueError`), so a caller
+can answer them and still let a plain `ValueError`, a caller bug, surface. The
+services reach the database only through repositories.
+
+Business rules — how many stamps an order earns, prize weights — are not
+decided in the ledger; callers pass the amounts in. The one rule enforced at
+this level is who qualifies: `ReferralService.qualify` accepts only the
+referred customer's Completed, paid, post-launch order. SQLite cannot prove the
+locking (it ignores `FOR UPDATE`), so `tests/test_loyalty_postgres.py` races
+real transactions on PostgreSQL when `VSHOP_TEST_POSTGRES_URL` is set, and
+`tests/test_loyalty_scenarios.py` checks on every run that each redemption path
+takes the account lock before its first write.
+
+## Stamp card engine
+
+`StampCardService` (`app/services/stamp_card.py`) applies the stamp-card rules;
+`StampCardPolicy` carries them, built from the `LOYALTY_*` settings.
+
+- **One trigger.** `AdminOrderService.set_order_status` locks the order row,
+  re-reads its status and — when the new status is `Completed` — calls
+  `award_for_order` in the same transaction. Status and stamps become durable
+  together or not at all, and a racing cancel is refused against the real status.
+- **Everything comes from the order row:** status `Completed`,
+  `loyalty_eligible` (placed after launch), charged `total_price` above zero.
+  Stamps = `floor(total_price / threshold)`, so €39.99 earns 1. An order below
+  the threshold books a 0-stamp row — it is still a purchase.
+- **Idempotent.** The ledger's unique `order_id` turns a replay into
+  `already_awarded`; `Completed` is terminal, so nothing ever needs reversing.
+- **No input can grant stamps.** Nothing outside `app/services/` calls the
+  ledger or binds a reward, and each booking call has exactly one caller;
+  `tests/test_stamp_card.py` pins both. It also requires the status-change
+  handler to pass its settings — without them, completion would silently apply
+  the default rules.
+
+## Free-bottle rewards
+
+Two steps, one reward row (`user_rewards`) whatever the source:
+
+1. **Unlock** — `StampCardService.claim_free_bottle` spends exactly
+   `LOYALTY_STAMPS_REQUIRED` stamps under the account lock and issues an
+   available free-bottle reward; the ledger's redemption row names it. A roulette
+   free-bottle prize issues the same kind of reward. Passing the card's
+   `version` (its latest ledger id) makes one rendered card claimable once, so a
+   double tap is refused with `StaleCardError`.
+2. **Redeem** — at checkout, `OrderService.place_order_from_cart(reward_id=…)`
+   asks `RewardService.plan_free_bottle` (locks, validates, and picks the dearest
+   product within the reward's price cap — before anything is written), creates
+   the order with that unit at €0, and `RewardService.redeem` binds the reward and
+   records `discount_amount` and `redeemed_product_id`. One transaction: if any
+   step fails, the reward stays available and no order exists.
 
 ## Routing
 

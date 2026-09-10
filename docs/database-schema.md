@@ -11,6 +11,8 @@ PostgreSQL schema is managed by Alembic.
 | `e5a3c7d21f04` | Statistics index on `order_items` |
 | `f6b1d4e8a207` | Drop two indexes made redundant by composites |
 | `3b9d6f2a8c14` | Loyalty foundation: accounts, stamp ledger, roulette, rewards, referrals |
+| `8e4c1a7b2d95` | `orders.loyalty_eligible` — stamps only for orders placed after launch |
+| `c5d2e8f1a6b3` | Reward redemption record: `user_rewards.discount_amount`, `redeemed_product_id` |
 
 ```bash
 alembic upgrade head
@@ -150,6 +152,7 @@ Indexes: `cart_id`, `product_id`.
 | `total_price` | numeric(10,2) | `>= 0` |
 | `payment_method` | varchar(32) | `cash` / `card`. Nullable — orders placed before this column existed keep `NULL` |
 | `status` | varchar(32) | `New` / `Accepted` / `Shipped` / `Completed` / `Cancelled` |
+| `loyalty_eligible` | boolean | `true` for every order the app places; server default `false`, so orders that existed when the loyalty programme launched never earn stamps |
 | `created_at` | timestamptz | |
 
 Indexes: `user_id`, composite `(status, created_at)`. There is no single-column
@@ -286,6 +289,8 @@ expiry. A reward used on an order that is later cancelled stays `used`.
 | `spin_id` | int FK → roulette_spins | Set only for `roulette` rewards; unique |
 | `order_id` | int FK → orders | The order it was used on; unique — one reward per order |
 | `used_at` | timestamptz | Set together with `order_id` |
+| `discount_amount` | numeric(10,2) | The value taken off the order; set exactly when used, `>= 0` |
+| `redeemed_product_id` | int FK → products | Free bottle only: the product made free (its €0 order line); set exactly when used. `ON DELETE RESTRICT` |
 | `created_at` | timestamptz | |
 
 Indexes: composite `(user_id, status)`; unique `spin_id`, unique `order_id`.
@@ -365,7 +370,7 @@ New ──► Accepted ──► Shipped ──► Completed   (terminal)
 
 ## Migrations
 
-Seven, linear and single-headed. See
+Nine, linear and single-headed. See
 [deployment.md](deployment.md#migrations) for what each one does and which
 downgrades are data-safe. No `upgrade()` in this project drops a table, drops a
 column, truncates, or deletes rows — enforced by `tests/test_migrations.py`.

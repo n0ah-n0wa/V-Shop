@@ -35,19 +35,31 @@ from app.database.base import Base
 from app.models.enums import (
     LoyaltyTransactionType,
     OrderStatus,
+    PaymentMethod,
     RewardSource,
     RewardType,
     RoulettePrizeType,
 )
 from app.models.loyalty import LoyaltyTransaction
+from app.models.order import Order
 from app.models.referral import Referral
 from app.models.reward import UserReward
 from app.models.roulette import RouletteSpin, RouletteSpinGrant
-from app.services.loyalty import InsufficientStampsError, LedgerPosting, LoyaltyService
+from app.models.user import User
+from app.services.admin import AdminService, InvalidStatusTransitionError
+from app.services.cart import CartService
+from app.services.loyalty import (
+    InsufficientStampsError,
+    LedgerPosting,
+    LoyaltyService,
+    StaleCardError,
+)
+from app.services.order import EmptyCartError, OrderService
 from app.services.referral import ReferralAttribution, ReferralService
 from app.services.reward import RewardService, RewardUnavailableError
 from app.services.roulette import RoulettePrize, RouletteService, SpinGrantResult
-from tests.factories import make_order, make_user
+from app.services.stamp_card import StampCardService
+from tests.factories import add_order_item, make_category, make_order, make_product, make_user
 
 URL = os.environ.get("VSHOP_TEST_POSTGRES_URL", "")
 RACERS = 8
@@ -191,7 +203,7 @@ async def test_concurrent_redemptions_cannot_overdraw(pg: Factory) -> None:
 
     results = await race(
         pg,
-        lambda s, _: LoyaltyService(s).redeem_free_bottle(
+        lambda s, _: LoyaltyService(s).claim_free_bottle(
             user_id, stamps_required=10, max_item_price=CEILING
         ),
     )
@@ -205,21 +217,30 @@ async def test_concurrent_redemptions_cannot_overdraw(pg: Factory) -> None:
 
 
 async def test_a_reward_is_bound_to_one_order_under_contention(pg: Factory) -> None:
-    async def build(session: AsyncSession) -> tuple[int, int, list[int]]:
+    async def build(session: AsyncSession) -> tuple[int, int, int, list[int]]:
         user = await make_user(session, telegram_id=9004)
+        bottle = await make_product(session, await make_category(session), price="20.00")
         orders = [await make_order(session, user) for _ in range(RACERS)]
+        for order in orders:
+            await add_order_item(session, order, bottle, price="0.00")
         loyalty = LoyaltyService(session)
         await loyalty.adjust(user.id, amount=10, note="test setup")
-        reward = await loyalty.redeem_free_bottle(
+        reward = await loyalty.claim_free_bottle(
             user.id, stamps_required=10, max_item_price=CEILING
         )
-        return user.id, reward.id, [order.id for order in orders]
+        return user.id, reward.id, bottle.id, [order.id for order in orders]
 
-    user_id, reward_id, order_ids = await seed(pg, build)
+    user_id, reward_id, bottle_id, order_ids = await seed(pg, build)
 
     results = await race(
         pg,
-        lambda s, i: RewardService(s).use_reward(reward_id, user_id=user_id, order_id=order_ids[i]),
+        lambda s, i: RewardService(s).use_reward(
+            reward_id,
+            user_id=user_id,
+            order_id=order_ids[i],
+            discount_amount=CEILING,
+            redeemed_product_id=bottle_id,
+        ),
     )
 
     assert sum(isinstance(r, UserReward) for r in results) == 1
@@ -377,3 +398,138 @@ async def test_postgres_refuses_cross_customer_references(pg: Factory) -> None:
             with pytest.raises(IntegrityError, match=constraint):
                 await session.flush()
             await session.rollback()
+
+
+async def test_concurrent_claims_from_one_card_unlock_once(pg: Factory) -> None:
+    """A double tap, for real: 20 stamps, one rendered card, many claims."""
+
+    async def build(session: AsyncSession) -> tuple[int, int]:
+        user = await make_user(session, telegram_id=9013)
+        loyalty = LoyaltyService(session)
+        await loyalty.adjust(user.id, amount=20, note="test setup")
+        return user.id, await loyalty.ledger_version(user.id)
+
+    user_id, version = await seed(pg, build)
+
+    results = await race(
+        pg,
+        lambda s, _: StampCardService(s).claim_free_bottle(user_id, card_version=version),
+    )
+
+    assert sum(isinstance(r, UserReward) for r in results) == 1
+    assert sum(isinstance(r, StaleCardError) for r in results) == RACERS - 1
+    async with pg() as session:
+        assert await LoyaltyService(session).balance(user_id) == 10
+        assert await LoyaltyService(session).ledger_balance(user_id) == 10
+
+
+async def test_concurrent_checkouts_redeem_a_reward_once(pg: Factory) -> None:
+    async def build(session: AsyncSession) -> tuple[int, int]:
+        user = await make_user(session, telegram_id=9014)
+        bottle = await make_product(session, await make_category(session), price="20.00")
+        await CartService(session).add_product(user.id, bottle, quantity=2)
+        loyalty = LoyaltyService(session)
+        await loyalty.adjust(user.id, amount=10, note="test setup")
+        reward = await loyalty.claim_free_bottle(
+            user.id, stamps_required=10, max_item_price=CEILING
+        )
+        return user.id, reward.id
+
+    user_id, reward_id = await seed(pg, build)
+
+    async def checkout(session: AsyncSession, _: int) -> Order:
+        user = await session.get(User, user_id)
+        assert user is not None
+        return await OrderService(session).place_order_from_cart(
+            user,
+            customer_name="Anna",
+            delivery_type="pickup",
+            address="Street 1",
+            preferred_time="18:00",
+            phone=None,
+            payment_method=PaymentMethod.CASH,
+            reward_id=reward_id,
+        )
+
+    results = await race(pg, checkout)
+
+    orders = [r for r in results if isinstance(r, Order)]
+    assert len(orders) == 1 and orders[0].total_price == Decimal("20.00")
+    assert all(isinstance(e, EmptyCartError) for e in errors(results)), errors(results)
+    assert (
+        await scalar(
+            pg,
+            select(func.count()).select_from(UserReward).where(UserReward.status == "used"),
+        )
+        == 1
+    )
+
+
+async def _set_status(session: AsyncSession, order_id: int, target: OrderStatus) -> OrderStatus:
+    admin = AdminService(session)
+    order = await admin.get_order(order_id)
+    assert order is not None
+    return (await admin.set_order_status(order, target)).status
+
+
+async def _shipped_order(pg: Factory, telegram_id: int) -> tuple[int, int]:
+    async def build(session: AsyncSession) -> tuple[int, int]:
+        user = await make_user(session, telegram_id=telegram_id)
+        order = await make_order(session, user, status=OrderStatus.SHIPPED)
+        order.total_price = Decimal("40.00")
+        await session.flush()
+        return user.id, order.id
+
+    result: tuple[int, int] = await seed(pg, build)
+    return result
+
+
+async def test_racing_completions_award_once(pg: Factory) -> None:
+    user_id, order_id = await _shipped_order(pg, 9011)
+
+    results = await race(pg, lambda s, _: _set_status(s, order_id, OrderStatus.COMPLETED))
+
+    assert errors(results) == []
+    async with pg() as session:
+        assert await LoyaltyService(session).balance(user_id) == 2
+        assert await LoyaltyService(session).ledger_balance(user_id) == 2
+    assert (
+        await scalar(
+            pg,
+            select(func.count())
+            .select_from(LoyaltyTransaction)
+            .where(LoyaltyTransaction.order_id == order_id),
+        )
+        == 1
+    )
+
+
+async def test_a_racing_cancel_cannot_undo_a_completed_award(pg: Factory) -> None:
+    """
+    Complete and cancel race on one Shipped order. Whichever commits first wins;
+    the other is refused against the locked, re-read status — so stamps exist if
+    and only if the order ends Completed.
+    """
+    user_id, order_id = await _shipped_order(pg, 9012)
+
+    results = await race(
+        pg,
+        lambda s, i: _set_status(
+            s, order_id, OrderStatus.COMPLETED if i % 2 == 0 else OrderStatus.CANCELLED
+        ),
+    )
+
+    assert all(isinstance(r, InvalidStatusTransitionError) for r in errors(results)), errors(
+        results
+    )
+    final = await scalar(pg, select(Order.status).where(Order.id == order_id))
+    booked = await scalar(
+        pg,
+        select(func.count())
+        .select_from(LoyaltyTransaction)
+        .where(LoyaltyTransaction.order_id == order_id),
+    )
+    assert (final == OrderStatus.COMPLETED) == (booked == 1)
+    assert booked in (0, 1)
+    async with pg() as session:
+        assert await LoyaltyService(session).balance(user_id) == 2 * booked

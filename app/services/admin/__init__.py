@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings
 from app.models.category import Category, Subcategory
 from app.models.enums import OrderStatus
 from app.models.order import Order
@@ -20,6 +21,7 @@ from app.services.admin.exceptions import (
 )
 from app.services.admin.orders import AdminOrderService
 from app.services.admin.users import AdminUserService
+from app.services.stamp_card import StampCardPolicy
 
 __all__ = [
     "AdminService",
@@ -41,10 +43,14 @@ class AdminService:
     ``AdminUserService`` in new code; existing handlers may keep using this type.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, settings: Settings | None = None) -> None:
+        """``settings`` carries the configured stamp-card rules to order completion."""
         self.session = session
         self.catalog = AdminCatalogService(session)
-        self.order_admin = AdminOrderService(session)
+        self.order_admin = AdminOrderService(
+            session,
+            stamp_policy=StampCardPolicy.from_settings(settings) if settings is not None else None,
+        )
         self.user_admin = AdminUserService(session)
         # Preserve legacy repository attributes used by some call sites.
         self.products = self.catalog.products

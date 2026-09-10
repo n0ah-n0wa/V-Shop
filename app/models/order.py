@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Enum,
     ForeignKey,
@@ -14,6 +15,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    false,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -71,6 +73,16 @@ class Order(Base, TimestampMixin):
         server_default=OrderStatus.NEW.value,
         # No single-column index: ix_orders_status_created_at leads with status
         # and serves every lookup on it, including count(*) as an index-only scan.
+    )
+    # Set at placement: every order the application creates can earn loyalty
+    # stamps. The server default is false so orders that already existed when
+    # the programme launched — including ones still in progress — never do
+    # (owner decision; migration 8e4c1a7b2d95).
+    loyalty_eligible: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=false(),
     )
 
     user: Mapped[User] = relationship(back_populates="orders")

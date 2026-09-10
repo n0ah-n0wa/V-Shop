@@ -15,12 +15,6 @@ class RouletteSpinRepository(BaseRepository[RouletteSpin]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session)
 
-    async def get_by_grant_id(self, grant_id: int) -> RouletteSpin | None:
-        result = await self.session.scalars(
-            select(RouletteSpin).where(RouletteSpin.grant_id == grant_id)
-        )
-        return result.first()
-
     async def list_for_user(self, user_id: int, *, limit: int | None = None) -> list[RouletteSpin]:
         """Newest first."""
         stmt = (

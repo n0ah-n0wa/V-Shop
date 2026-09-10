@@ -25,14 +25,20 @@ import asyncio
 import json
 import sys
 from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import exists, func, inspect, select, text
+from sqlalchemy import Select, and_, case, exists, func, inspect, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import get_settings
 from app.models.cart import Cart, CartItem
 from app.models.category import Category, Subcategory
-from app.models.enums import OrderStatus, SpinGrantReason
+from app.models.enums import (
+    LoyaltyTransactionType,
+    OrderStatus,
+    RewardSource,
+    SpinGrantReason,
+)
 from app.models.loyalty import LoyaltyAccount, LoyaltyTransaction
 from app.models.order import Order, OrderItem
 from app.models.product import Product
@@ -54,27 +60,93 @@ async def _has_table(session: AsyncSession, name: str) -> bool:
     return bool(await session.run_sync(lambda sync: inspect(sync.connection()).has_table(name)))
 
 
-async def _loyalty_health(session: AsyncSession) -> dict[str, int]:
-    """Counts that must all be 0 once the loyalty migration has run."""
-    ledger_totals = (
+async def loyalty_health(session: AsyncSession) -> dict[str, dict[str, int]]:
+    """
+    The loyalty tables checked against each other.
+
+    ``integrity`` counts states the services never produce, so every value must
+    be 0 — anything else means rows were changed behind their back, and the
+    ledger is the record to trust. ``coverage`` counts customers without their
+    loyalty rows: 0 right after the loyalty migration, then growing with new
+    sign-ups until onboarding grants them (accounts are created on first use).
+    """
+
+    async def count(statement: Select[Any]) -> int:
+        return int(await session.scalar(statement) or 0)
+
+    per_user = (
         select(
             LoyaltyTransaction.user_id.label("user_id"),
             func.sum(LoyaltyTransaction.amount).label("total"),
+            func.sum(
+                case((LoyaltyTransaction.kind == LoyaltyTransactionType.PURCHASE, 1), else_=0)
+            ).label("purchases"),
         )
         .group_by(LoyaltyTransaction.user_id)
         .subquery()
     )
+    accounts = (
+        select(func.count())
+        .select_from(LoyaltyAccount)
+        .outerjoin(per_user, per_user.c.user_id == LoyaltyAccount.user_id)
+    )
+    running = select(
+        LoyaltyTransaction.balance_after.label("balance_after"),
+        func.sum(LoyaltyTransaction.amount)
+        .over(partition_by=LoyaltyTransaction.user_id, order_by=LoyaltyTransaction.id)
+        .label("running"),
+    ).subquery()
+    spun = exists().where(RouletteSpin.grant_id == RouletteSpinGrant.id)
+
     return {
-        "users_without_account": int(
-            await session.scalar(
+        "integrity": {
+            # Ledger rows of a customer with no account count too: nothing
+            # explains them either.
+            "balances_disagreeing_with_ledger": await count(
+                accounts.where(LoyaltyAccount.stamp_balance != func.coalesce(per_user.c.total, 0))
+            )
+            + await count(
+                select(func.count())
+                .select_from(per_user)
+                .where(~exists().where(LoyaltyAccount.user_id == per_user.c.user_id))
+            ),
+            "purchase_counts_disagreeing_with_ledger": await count(
+                accounts.where(
+                    LoyaltyAccount.qualifying_purchase_count
+                    != func.coalesce(per_user.c.purchases, 0)
+                )
+            ),
+            "ledger_rows_with_wrong_running_balance": await count(
+                select(func.count())
+                .select_from(running)
+                .where(running.c.balance_after != running.c.running)
+            ),
+            "stamp_card_rewards_without_debit": await count(
+                select(func.count())
+                .select_from(UserReward)
+                .where(
+                    UserReward.source == RewardSource.STAMP_CARD,
+                    ~exists().where(LoyaltyTransaction.reward_id == UserReward.id),
+                )
+            ),
+            "spin_grants_out_of_step_with_spins": await count(
+                select(func.count())
+                .select_from(RouletteSpinGrant)
+                .where(
+                    or_(
+                        and_(RouletteSpinGrant.consumed_at.is_not(None), ~spun),
+                        and_(RouletteSpinGrant.consumed_at.is_(None), spun),
+                    )
+                )
+            ),
+        },
+        "coverage": {
+            "users_without_account": await count(
                 select(func.count())
                 .select_from(User)
                 .where(~exists().where(LoyaltyAccount.user_id == User.id))
-            )
-            or 0
-        ),
-        "users_without_welcome_spin": int(
-            await session.scalar(
+            ),
+            "users_without_welcome_spin": await count(
                 select(func.count())
                 .select_from(User)
                 .where(
@@ -83,18 +155,8 @@ async def _loyalty_health(session: AsyncSession) -> dict[str, int]:
                         RouletteSpinGrant.reason == SpinGrantReason.INITIAL_PROMO,
                     )
                 )
-            )
-            or 0
-        ),
-        "balances_disagreeing_with_ledger": int(
-            await session.scalar(
-                select(func.count())
-                .select_from(LoyaltyAccount)
-                .outerjoin(ledger_totals, ledger_totals.c.user_id == LoyaltyAccount.user_id)
-                .where(LoyaltyAccount.stamp_balance != func.coalesce(ledger_totals.c.total, 0))
-            )
-            or 0
-        ),
+            ),
+        },
     }
 
 
@@ -129,7 +191,7 @@ async def collect(session: AsyncSession) -> dict[str, object]:
                 "referrals": await count(Referral),
             }
         )
-        report["loyalty"] = await _loyalty_health(session)
+        report["loyalty"] = await loyalty_health(session)
     else:
         report["loyalty"] = {"schema": "missing: migration 3b9d6f2a8c14 is not applied"}
     report["db"] = db

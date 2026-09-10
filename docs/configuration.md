@@ -67,6 +67,27 @@ punctuated follow the reader's language — `€1,234.56` in English, `1.234,56 
 in German, `1 234,56 €` in Russian and Ukrainian. Those conventions live in the
 `format` section of each locale catalog.
 
+## Loyalty stamp card
+
+All optional; these are the defaults.
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `LOYALTY_STAMP_PURCHASE_THRESHOLD` | decimal | `20.00` | Charged order total that earns one stamp, in whole multiples: €20 → 1, €39.99 → 1, €40 → 2. At least `1.00` |
+| `LOYALTY_STAMPS_REQUIRED` | int | `10` | Stamps that unlock one free bottle |
+| `LOYALTY_FREE_BOTTLE_MAX_PRICE` | decimal | `20.00` | Most expensive product a free bottle may cover; snapshotted onto each reward when issued |
+
+Stamps are booked when an admin marks an order **Completed**, from the order's
+charged total — after any discount, and a free bottle is a €0 line. An order
+charged €0 is not a purchase. Orders that existed before migration
+`8e4c1a7b2d95` never earn stamps. Changing a value affects what happens next;
+stamps and rewards already booked never change.
+
+Money values take at most two decimal places and eight whole digits, and the
+threshold is at least `1.00` — a mistyped `0.2` would otherwise stamp every
+order a hundredfold. An invalid value stops the bot at startup, never at the
+first completed order.
+
 ## Docker Compose extras
 
 Compose can override DB credentials via:

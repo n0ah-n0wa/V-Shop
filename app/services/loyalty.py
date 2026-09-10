@@ -19,7 +19,7 @@ caller owns the unit of work (``DatabaseMiddleware`` in a handler).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,39 +31,34 @@ from app.models.enums import (
     RewardType,
 )
 from app.models.loyalty import LoyaltyAccount, LoyaltyTransaction
-from app.models.order import Order
-from app.models.referral import Referral
 from app.models.reward import UserReward
-from app.models.roulette import RouletteSpin
 from app.repositories.loyalty_account import LoyaltyAccountRepository
 from app.repositories.loyalty_transaction import LoyaltyTransactionRepository
+from app.repositories.order import OrderRepository
+from app.repositories.referral import ReferralRepository
+from app.repositories.roulette_spin import RouletteSpinRepository
 from app.repositories.user_reward import UserRewardRepository
-from app.utils.validators import MAX_PRICE, MIN_PRICE
+from app.utils.validators import to_money
 
-MONEY_QUANTUM = Decimal("0.01")
 NOTE_MAX_LENGTH = 255
 
 
-class InsufficientStampsError(ValueError):
+class LoyaltyError(ValueError):
+    """
+    A loyalty operation refused by a business rule, before anything was written.
+
+    Every refusal a customer can cause — too few stamps, a stale card, a reward
+    already used — derives from it, so a caller can answer those and still let a
+    plain ``ValueError`` (a caller bug, such as another customer's order) surface.
+    """
+
+
+class InsufficientStampsError(LoyaltyError):
     """Raised when an operation would take a stamp balance below zero."""
 
 
-def to_money(value: Decimal | int | str) -> Decimal:
-    """
-    A price that fits ``Numeric(10, 2)``, rounded to cents.
-
-    Floats are refused rather than converted — ``Decimal(19.99)`` is
-    ``19.98999…`` — because money is Decimal end to end in this project.
-    """
-    if isinstance(value, float | bool) or not isinstance(value, Decimal | int | str):
-        raise TypeError(f"Money must be a Decimal, not {type(value).__name__}")
-    try:
-        amount = Decimal(value)
-    except InvalidOperation as exc:
-        raise ValueError(f"{value!r} is not a number") from exc
-    if not amount.is_finite() or not MIN_PRICE <= amount <= MAX_PRICE:
-        raise ValueError(f"{value!r} is not a price between {MIN_PRICE} and {MAX_PRICE}")
-    return amount.quantize(MONEY_QUANTUM)
+class StaleCardError(LoyaltyError):
+    """The card a claim was made from no longer matches the ledger — e.g. a double tap."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +75,9 @@ class LoyaltyService:
         self.accounts = LoyaltyAccountRepository(session)
         self.transactions = LoyaltyTransactionRepository(session)
         self.rewards = UserRewardRepository(session)
+        self.orders = OrderRepository(session)
+        self.referrals = ReferralRepository(session)
+        self.spins = RouletteSpinRepository(session)
 
     # --- accounts -----------------------------------------------------------------
 
@@ -110,6 +108,10 @@ class LoyaltyService:
         """The balance as the ledger explains it. Must equal :meth:`balance`."""
         return await self.transactions.sum_for_user(user_id)
 
+    async def ledger_version(self, user_id: int) -> int:
+        """Id of the customer's latest ledger row (0 if none) — changes on every movement."""
+        return await self.transactions.latest_id_for_user(user_id)
+
     async def history(self, user_id: int, *, limit: int = 50) -> list[LoyaltyTransaction]:
         return await self.transactions.list_for_user(user_id, limit=limit)
 
@@ -125,7 +127,7 @@ class LoyaltyService:
         """
         if stamps < 0:
             raise ValueError("A purchase cannot earn a negative number of stamps")
-        order = await self.session.get(Order, order_id)
+        order = await self.orders.get_by_id(order_id)
         if order is None or order.user_id != user_id:
             raise ValueError(f"Order {order_id} does not belong to user {user_id}")
 
@@ -153,7 +155,7 @@ class LoyaltyService:
         """Book a referral bonus for either side of the referral. Once per side."""
         if stamps <= 0:
             raise ValueError("A referral bonus must be positive")
-        referral = await self.session.get(Referral, referral_id)
+        referral = await self.referrals.get_by_id(referral_id)
         if referral is None or user_id not in (
             referral.referrer_user_id,
             referral.referred_user_id,
@@ -181,7 +183,7 @@ class LoyaltyService:
         """Book the stamps a roulette spin won. Once per spin."""
         if stamps <= 0:
             raise ValueError("A roulette stamp prize must be positive")
-        spin = await self.session.get(RouletteSpin, spin_id)
+        spin = await self.spins.get_by_id(spin_id)
         if spin is None or spin.user_id != user_id:
             raise ValueError(f"Spin {spin_id} does not belong to user {user_id}")
 
@@ -225,24 +227,35 @@ class LoyaltyService:
 
     # --- spending -----------------------------------------------------------------
 
-    async def redeem_free_bottle(
+    async def claim_free_bottle(
         self,
         user_id: int,
         *,
         stamps_required: int,
         max_item_price: Decimal,
+        expected_version: int | None = None,
     ) -> UserReward:
         """
         Exchange stamps for a free-bottle reward, debit and reward together.
 
-        Not idempotent by design — a customer holding 20 stamps may claim twice —
-        but a double tap cannot overdraw: the balance is checked under the lock.
+        The balance is checked under the account lock, so no concurrency can
+        overdraw it. A customer holding 20 stamps may claim twice; to make one
+        *card* claimable once, pass ``expected_version`` — the
+        :meth:`ledger_version` the card was rendered from. Any movement since
+        (including the first tap of a double tap) raises :class:`StaleCardError`.
         """
         if stamps_required <= 0:
             raise ValueError("A redemption must cost at least one stamp")
         price = to_money(max_item_price)
 
         account = await self.lock_account(user_id)
+        if expected_version is not None:
+            current = await self.transactions.latest_id_for_user(user_id)
+            if current != expected_version:
+                raise StaleCardError(
+                    f"User {user_id}'s card changed since it was shown "
+                    f"(version {expected_version}, now {current})"
+                )
         if account.stamp_balance < stamps_required:
             raise InsufficientStampsError(
                 f"User {user_id} has {account.stamp_balance} stamps; {stamps_required} are required"

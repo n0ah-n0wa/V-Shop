@@ -17,12 +17,12 @@ from datetime import UTC, datetime
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import ReferralStatus
-from app.models.order import Order
+from app.models.enums import OrderStatus, ReferralStatus
 from app.models.referral import Referral
 from app.repositories.loyalty_account import LoyaltyAccountRepository
+from app.repositories.order import OrderRepository
 from app.repositories.referral import ReferralRepository
-from app.services.loyalty import LoyaltyService
+from app.services.loyalty import LoyaltyError, LoyaltyService
 
 # 9 random bytes -> 12 URL-safe characters: fits Telegram's 64-character
 # /start payload with room to spare, and is not guessable like a user id.
@@ -31,11 +31,11 @@ REFERRAL_CODE_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,32}")
 _CODE_ATTEMPTS = 5
 
 
-class SelfReferralError(ValueError):
+class SelfReferralError(LoyaltyError):
     """A customer tried to refer themselves."""
 
 
-class ReferralLoopError(ValueError):
+class ReferralLoopError(LoyaltyError):
     """The would-be referrer was themselves referred by this customer."""
 
 
@@ -58,6 +58,7 @@ class ReferralService:
         self.session = session
         self.referrals = ReferralRepository(session)
         self.accounts = LoyaltyAccountRepository(session)
+        self.orders = OrderRepository(session)
         self.loyalty = LoyaltyService(session)
 
     async def get_or_create_referral_code(self, user_id: int) -> str:
@@ -124,17 +125,26 @@ class ReferralService:
         """
         Mark a pending referral qualified by the referred customer's order.
 
-        Returns ``True`` only for the call that made the change; an already
-        qualified referral returns ``False`` and is left as it is.
+        Owner decision: the order that qualifies a referral is a Completed one,
+        charged more than €0, placed after the programme launched. Anything else
+        is refused, so no bonus can ever be paid on an order that may still be
+        cancelled. Returns ``True`` only for the call that made the change; an
+        already qualified referral returns ``False`` and is left as it is.
         """
         referral = await self.referrals.get_for_update(referral_id)
         if referral is None:
             raise ValueError(f"Referral {referral_id} does not exist")
-        order = await self.session.get(Order, order_id)
+        order = await self.orders.get_by_id(order_id)
         if order is None or order.user_id != referral.referred_user_id:
             raise ValueError(
                 f"Order {order_id} is not an order of referred user {referral.referred_user_id}"
             )
+        if (
+            order.status != OrderStatus.COMPLETED
+            or not order.loyalty_eligible
+            or order.total_price <= 0
+        ):
+            raise ValueError(f"Order {order_id} is not a completed, paid order placed after launch")
         if referral.status == ReferralStatus.QUALIFIED:
             return False
 

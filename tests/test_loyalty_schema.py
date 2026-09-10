@@ -43,14 +43,17 @@ from app.models.enums import (
 )
 from app.models.loyalty import LoyaltyAccount, LoyaltyTransaction
 from app.models.order import Order
+from app.models.product import Product
 from app.models.referral import Referral
 from app.models.reward import UserReward
 from app.models.roulette import RouletteSpin, RouletteSpinGrant
 from app.models.user import User
-from tests.factories import make_order, make_user
+from tests.factories import make_category, make_order, make_product, make_user
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MIGRATION = ROOT / "alembic" / "versions" / "3b9d6f2a8c14_loyalty_foundation.py"
+# Later migrations that extend the loyalty tables (never an existing table).
+REDEMPTION_MIGRATION = ROOT / "alembic" / "versions" / "c5d2e8f1a6b3_reward_redemption_record.py"
 LOYALTY_TABLES = frozenset(
     {
         "loyalty_accounts",
@@ -87,6 +90,7 @@ class World:
     spin: RouletteSpin
     spare_spin: RouletteSpin
     reward: UserReward
+    product: Product
 
 
 async def _spin(session: AsyncSession, user: User, reason: SpinGrantReason) -> RouletteSpin:
@@ -145,7 +149,8 @@ async def world(session: AsyncSession) -> World:
     )
     session.add(spare_spin)
     await session.flush()
-    return World(alice, bob, order, other_order, referral, grant, spin, spare_spin, reward)
+    product = await make_product(session, await make_category(session, name="Liquids"))
+    return World(alice, bob, order, other_order, referral, grant, spin, spare_spin, reward, product)
 
 
 # --------------------------------------------------------------------- accounts
@@ -357,13 +362,43 @@ async def test_valid_rewards_are_accepted(session: AsyncSession, world: World) -
             spin_id=world.spare_spin.id,
         ),
     )
+    assert not await rejected(session, used(world, world.order))
     assert not await rejected(
         session,
-        reward(world, status=RewardStatus.USED, order_id=world.order.id, used_at=NOW),
-    )
+        reward(
+            world,
+            kind=RewardType.DISCOUNT_PERCENT,
+            value=10,
+            max_item_price=None,
+            status=RewardStatus.USED,
+            order_id=world.other_order.id,
+            used_at=NOW,
+            discount_amount=Decimal("3.20"),
+        ),
+    ), "a used discount records its value and names no product"
+
+
+def used(world: World, order: Order, **overrides: Any) -> UserReward:
+    """A properly redeemed free bottle."""
+    fields: dict[str, Any] = {
+        "status": RewardStatus.USED,
+        "order_id": order.id,
+        "used_at": NOW,
+        "discount_amount": CEILING,
+        "redeemed_product_id": world.product.id,
+    }
+    return reward(world, **(fields | overrides))
 
 
 INVALID_REWARDS: dict[str, Callable[[World], UserReward]] = {
+    "used without a discount record": lambda w: used(w, w.order, discount_amount=None),
+    "used free bottle naming no product": lambda w: used(w, w.order, redeemed_product_id=None),
+    "negative discount": lambda w: used(w, w.order, discount_amount=Decimal("-1.00")),
+    "available but carrying a discount": lambda w: reward(w, discount_amount=CEILING),
+    "available but naming a product": lambda w: reward(w, redeemed_product_id=w.product.id),
+    "discount reward naming a product": lambda w: used(
+        w, w.order, kind=RewardType.DISCOUNT_PERCENT, value=10, max_item_price=None
+    ),
     "discount above 100%": lambda w: reward(
         w, kind=RewardType.DISCOUNT_PERCENT, value=101, max_item_price=None
     ),
@@ -374,8 +409,8 @@ INVALID_REWARDS: dict[str, Callable[[World], UserReward]] = {
     "free bottle without a ceiling": lambda w: reward(w, max_item_price=None),
     "free bottle with a zero ceiling": lambda w: reward(w, max_item_price=Decimal("0.00")),
     "two bottles in one reward": lambda w: reward(w, value=2),
-    "used without an order": lambda w: reward(w, status=RewardStatus.USED, used_at=NOW),
-    "used without a timestamp": lambda w: reward(w, status=RewardStatus.USED, order_id=w.order.id),
+    "used without an order": lambda w: used(w, w.order, order_id=None),
+    "used without a timestamp": lambda w: used(w, w.order, used_at=None),
     "available but bound to an order": lambda w: reward(w, order_id=w.order.id),
     "roulette reward without a spin": lambda w: reward(w, source=RewardSource.ROULETTE),
     "stamp-card reward pointing at a spin": lambda w: reward(w, spin_id=w.spare_spin.id),
@@ -390,11 +425,8 @@ async def test_inconsistent_rewards_are_refused(
 
 
 async def test_one_reward_per_order_and_per_spin(session: AsyncSession, world: World) -> None:
-    def used_on(order: Order) -> UserReward:
-        return reward(world, status=RewardStatus.USED, order_id=order.id, used_at=NOW)
-
-    assert not await rejected(session, used_on(world.order))
-    assert await rejected(session, used_on(world.order)), "an order carries one reward"
+    assert not await rejected(session, used(world, world.order))
+    assert await rejected(session, used(world, world.order)), "an order carries one reward"
 
     from_spin = reward(
         world,
@@ -558,15 +590,15 @@ async def test_loyalty_history_blocks_deleting_users_and_orders(fk_session: Asyn
 # ------------------------------------------------------- migration vs. models
 
 
-def _tree() -> ast.Module:
-    return ast.parse(MIGRATION.read_text(encoding="utf-8"))
+def _tree(path: pathlib.Path = MIGRATION) -> ast.Module:
+    return ast.parse(path.read_text(encoding="utf-8"))
 
 
-def _function(name: str) -> ast.FunctionDef:
-    for node in _tree().body:
+def _function(name: str, path: pathlib.Path = MIGRATION) -> ast.FunctionDef:
+    for node in _tree(path).body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
-    raise AssertionError(f"{MIGRATION.name} has no {name}()")
+    raise AssertionError(f"{path.name} has no {name}()")
 
 
 def _calls(scope: ast.AST, name: str) -> list[ast.Call]:
@@ -611,6 +643,8 @@ def test_check_constraints_are_identical_in_models_and_migration() -> None:
         _string(_keyword(call, "name")): _normalize(_string(call.args[0]))
         for call in _calls(_function("upgrade"), "CheckConstraint")
     }
+    for call in _calls(_function("upgrade", REDEMPTION_MIGRATION), "create_check_constraint"):
+        migration[_string(call.args[0])] = _normalize(_string(call.args[2]))
     models = {c.name: _normalize(str(c.sqltext)) for c in _model_constraints(CheckConstraint)}
     assert migration == models
 
@@ -670,6 +704,18 @@ def test_foreign_keys_are_identical_in_models_and_migration() -> None:
                     _string(ondelete) if ondelete is not None else None,
                 )
             )
+    for call in _calls(_function("upgrade", REDEMPTION_MIGRATION), "create_foreign_key"):
+        _name, source, referent, local, remote = call.args
+        assert isinstance(local, ast.List) and isinstance(remote, ast.List)
+        ondelete = _keyword(call, "ondelete")
+        migration.add(
+            (
+                _string(source),
+                tuple(_string(column) for column in local.elts),
+                tuple(f"{_string(referent)}.{_string(column)}" for column in remote.elts),
+                _string(ondelete) if ondelete is not None else None,
+            )
+        )
 
     models = {
         (
@@ -690,6 +736,29 @@ def test_the_downgrade_checks_for_customer_data_before_dropping_anything() -> No
     first = body[0].value
     assert isinstance(first, ast.Call) and isinstance(first.func, ast.Name)
     assert first.func.id == "_refuse_to_destroy_customer_activity"
+
+
+def test_the_redemption_migration_only_extends_user_rewards() -> None:
+    for call in ast.walk(_function("upgrade", REDEMPTION_MIGRATION)):
+        if not (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "op"
+        ):
+            continue
+        name = call.func.attr
+        if name == "add_column":
+            assert _string(call.args[0]) == "user_rewards"
+        elif name in ("create_foreign_key", "create_check_constraint"):
+            assert _string(call.args[1]) == "user_rewards"
+        else:
+            raise AssertionError(f"unexpected op.{name}() in upgrade()")
+
+    body = [n for n in _function("downgrade", REDEMPTION_MIGRATION).body if isinstance(n, ast.Expr)]
+    first = body[0].value
+    assert isinstance(first, ast.Call) and isinstance(first.func, ast.Name)
+    assert first.func.id == "_refuse_to_lose_redemption_records"
 
 
 def test_the_migration_writes_only_to_the_tables_it_creates() -> None:

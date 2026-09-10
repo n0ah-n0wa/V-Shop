@@ -5,7 +5,6 @@ from __future__ import annotations
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import LoyaltyTransactionType
 from app.models.loyalty import LoyaltyTransaction
 from app.repositories.base import BaseRepository
 
@@ -33,9 +32,6 @@ class LoyaltyTransactionRepository(BaseRepository[LoyaltyTransaction]):
 
     async def get_for_spin(self, spin_id: int) -> LoyaltyTransaction | None:
         return await self._first(LoyaltyTransaction.spin_id == spin_id)
-
-    async def get_for_reward(self, reward_id: int) -> LoyaltyTransaction | None:
-        return await self._first(LoyaltyTransaction.reward_id == reward_id)
 
     # --- history and audit --------------------------------------------------------
 
@@ -65,10 +61,11 @@ class LoyaltyTransactionRepository(BaseRepository[LoyaltyTransaction]):
         )
         return int(value or 0)
 
-    async def count_for_user(self, user_id: int, kind: LoyaltyTransactionType) -> int:
+    async def latest_id_for_user(self, user_id: int) -> int:
+        """The newest row's id, 0 if none. Served by ix_loyalty_transactions_user_id_id."""
         value = await self.session.scalar(
-            select(func.count())
-            .select_from(LoyaltyTransaction)
-            .where(LoyaltyTransaction.user_id == user_id, LoyaltyTransaction.kind == kind)
+            select(func.coalesce(func.max(LoyaltyTransaction.id), 0)).where(
+                LoyaltyTransaction.user_id == user_id
+            )
         )
         return int(value or 0)

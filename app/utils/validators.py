@@ -1,4 +1,4 @@
-"""Shared input validators for handlers and FSM wizards."""
+"""Shared validators: handler and FSM wizard input, and money computed in code."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ T = TypeVar("T")
 # Product.price is Numeric(10, 2)
 MAX_PRICE = Decimal("99999999.99")
 MIN_PRICE = Decimal("0.01")
+MONEY_QUANTUM = Decimal("0.01")
 
 PHONE_MIN_DIGITS = 8
 PHONE_MAX_DIGITS = 15
@@ -59,6 +60,25 @@ def parse_price(raw: str | None) -> Decimal | None:
     if value < MIN_PRICE or value > MAX_PRICE:
         return None
     return value.quantize(Decimal("0.01"))
+
+
+def to_money(value: Decimal | int | str) -> Decimal:
+    """
+    A price that fits ``Numeric(10, 2)``, rounded to cents.
+
+    For amounts that come from code or configuration; text a person typed goes
+    through :func:`parse_price`. Floats are refused rather than converted —
+    ``Decimal(19.99)`` is ``19.98999…`` — because money is Decimal end to end.
+    """
+    if isinstance(value, float | bool) or not isinstance(value, Decimal | int | str):
+        raise TypeError(f"Money must be a Decimal, not {type(value).__name__}")
+    try:
+        amount = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"{value!r} is not a number") from exc
+    if not amount.is_finite() or not MIN_PRICE <= amount <= MAX_PRICE:
+        raise ValueError(f"{value!r} is not a price between {MIN_PRICE} and {MAX_PRICE}")
+    return amount.quantize(MONEY_QUANTUM)
 
 
 def normalize_phone(raw: str | None) -> str | None:

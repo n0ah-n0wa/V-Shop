@@ -32,6 +32,27 @@ class OrderRepository(BaseRepository[Order]):
         )
         return result.first()
 
+    async def get_for_update(self, order_id: int) -> Order | None:
+        """
+        Lock an order row for the rest of the transaction and reload it.
+
+        ``populate_existing`` matters: the lock only helps if the caller then acts
+        on the row as it is now, not on whatever an earlier query left in the
+        identity map (a stale screen showing Shipped for an order already
+        Completed).
+        """
+        result = await self.session.scalars(
+            select(Order)
+            .where(Order.id == order_id)
+            .options(
+                selectinload(Order.items).selectinload(OrderItem.product),
+                selectinload(Order.user),
+            )
+            .with_for_update(of=Order)
+            .execution_options(populate_existing=True)
+        )
+        return result.first()
+
     async def list_by_status(
         self,
         status: OrderStatus | str,

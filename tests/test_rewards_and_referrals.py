@@ -1,4 +1,4 @@
-"""RewardService and ReferralService — using rewards on orders; referral attribution."""
+"""RewardService and ReferralService — binding rewards to orders; referral attribution."""
 
 from __future__ import annotations
 
@@ -8,6 +8,10 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import OrderStatus, ReferralStatus, RewardStatus
+from app.models.order import Order
+from app.models.product import Product
+from app.models.reward import UserReward
+from app.models.user import User
 from app.repositories.order import OrderRepository
 from app.services.loyalty import LoyaltyService
 from app.services.referral import (
@@ -18,7 +22,7 @@ from app.services.referral import (
     is_valid_referral_code,
 )
 from app.services.reward import RewardOrderError, RewardService, RewardUnavailableError
-from tests.factories import make_order, make_user
+from tests.factories import add_order_item, make_category, make_order, make_product, make_user
 
 CEILING = Decimal("20.00")
 
@@ -27,8 +31,32 @@ async def free_bottle(session: AsyncSession, user_id: int) -> int:
     """Give ``user_id`` one available free-bottle reward, the way the card does."""
     loyalty = LoyaltyService(session)
     await loyalty.adjust(user_id, amount=10, note="test setup")
-    reward = await loyalty.redeem_free_bottle(user_id, stamps_required=10, max_item_price=CEILING)
+    reward = await loyalty.claim_free_bottle(user_id, stamps_required=10, max_item_price=CEILING)
     return reward.id
+
+
+async def a_bottle(session: AsyncSession) -> Product:
+    category = await make_category(session, name="Liquids")
+    return await make_product(session, category, name_en="Mango", price="20.00")
+
+
+async def bottle_order(session: AsyncSession, user: User, bottle: Product) -> Order:
+    """A just-placed order holding ``bottle`` at €0 — what checkout builds."""
+    order = await make_order(session, user)
+    await add_order_item(session, order, bottle, price="0.00")
+    return order
+
+
+async def use(
+    rewards: RewardService, reward_id: int, user: User, order: Order, bottle: Product
+) -> UserReward:
+    return await rewards.use_reward(
+        reward_id,
+        user_id=user.id,
+        order_id=order.id,
+        discount_amount=CEILING,
+        redeemed_product_id=bottle.id,
+    )
 
 
 # --------------------------------------------------------------------- rewards
@@ -36,29 +64,32 @@ async def free_bottle(session: AsyncSession, user_id: int) -> int:
 
 async def test_a_reward_is_used_once(session: AsyncSession) -> None:
     user = await make_user(session, telegram_id=7501)
-    order = await make_order(session, user)
-    other_order = await make_order(session, user)
+    bottle = await a_bottle(session)
+    order = await bottle_order(session, user, bottle)
+    other_order = await bottle_order(session, user, bottle)
     reward_id = await free_bottle(session, user.id)
     rewards = RewardService(session)
 
-    used = await rewards.use_reward(reward_id, user_id=user.id, order_id=order.id)
+    used = await use(rewards, reward_id, user, order, bottle)
 
     assert (used.status, used.order_id) == (RewardStatus.USED, order.id)
+    assert (used.discount_amount, used.redeemed_product_id) == (CEILING, bottle.id)
     assert used.used_at is not None
     with pytest.raises(RewardUnavailableError):
-        await rewards.use_reward(reward_id, user_id=user.id, order_id=other_order.id)
+        await use(rewards, reward_id, user, other_order, bottle)
     assert await rewards.list_available(user.id) == []
 
 
 async def test_nobody_can_spend_someone_elses_reward(session: AsyncSession) -> None:
     alice = await make_user(session, telegram_id=7502)
     mallory = await make_user(session, telegram_id=7503)
-    mallory_order = await make_order(session, mallory)
+    bottle = await a_bottle(session)
+    mallory_order = await bottle_order(session, mallory, bottle)
     reward_id = await free_bottle(session, alice.id)
     rewards = RewardService(session)
 
     with pytest.raises(RewardUnavailableError):
-        await rewards.use_reward(reward_id, user_id=mallory.id, order_id=mallory_order.id)
+        await use(rewards, reward_id, mallory, mallory_order, bottle)
 
     reward = await rewards.get_for_user(reward_id, alice.id)
     assert reward is not None and reward.status is RewardStatus.AVAILABLE
@@ -67,25 +98,27 @@ async def test_nobody_can_spend_someone_elses_reward(session: AsyncSession) -> N
 async def test_a_reward_cannot_be_put_on_someone_elses_order(session: AsyncSession) -> None:
     alice = await make_user(session, telegram_id=7504)
     bob = await make_user(session, telegram_id=7505)
-    bob_order = await make_order(session, bob)
+    bottle = await a_bottle(session)
+    bob_order = await bottle_order(session, bob, bottle)
     reward_id = await free_bottle(session, alice.id)
     rewards = RewardService(session)
 
     with pytest.raises(RewardOrderError):
-        await rewards.use_reward(reward_id, user_id=alice.id, order_id=bob_order.id)
+        await use(rewards, reward_id, alice, bob_order, bottle)
     assert [reward.id for reward in await rewards.list_available(alice.id)] == [reward_id]
 
 
 async def test_an_order_carries_at_most_one_reward(session: AsyncSession) -> None:
     user = await make_user(session, telegram_id=7506)
-    order = await make_order(session, user)
+    bottle = await a_bottle(session)
+    order = await bottle_order(session, user, bottle)
     first = await free_bottle(session, user.id)
     second = await free_bottle(session, user.id)
     rewards = RewardService(session)
 
-    await rewards.use_reward(first, user_id=user.id, order_id=order.id)
+    await use(rewards, first, user, order, bottle)
     with pytest.raises(RewardOrderError):
-        await rewards.use_reward(second, user_id=user.id, order_id=order.id)
+        await use(rewards, second, user, order, bottle)
 
     assert [reward.id for reward in await rewards.list_available(user.id)] == [second]
 
@@ -95,10 +128,11 @@ async def test_a_used_reward_stays_used_when_its_order_is_cancelled(
 ) -> None:
     """Owner decision: cancelling an order forfeits the reward used on it."""
     user = await make_user(session, telegram_id=7507)
-    order = await make_order(session, user)
+    bottle = await a_bottle(session)
+    order = await bottle_order(session, user, bottle)
     reward_id = await free_bottle(session, user.id)
     rewards = RewardService(session)
-    await rewards.use_reward(reward_id, user_id=user.id, order_id=order.id)
+    await use(rewards, reward_id, user, order, bottle)
 
     await OrderRepository(session).update_status(order, OrderStatus.CANCELLED)
 
@@ -205,3 +239,35 @@ async def test_only_the_referred_customers_order_can_qualify_it(session: AsyncSe
         await referrals.qualify(referral.id, order_id=alice_order.id)
     stored = await referrals.get_for_referred_user(bob.id)
     assert stored is not None and stored.status is ReferralStatus.PENDING
+
+
+@pytest.mark.parametrize(
+    "order_state",
+    [
+        {"status": OrderStatus.NEW},
+        {"status": OrderStatus.SHIPPED},
+        {"status": OrderStatus.CANCELLED},
+        {"status": OrderStatus.COMPLETED, "total_price": Decimal("0.00")},
+        {"status": OrderStatus.COMPLETED, "loyalty_eligible": False},
+    ],
+    ids=["new", "shipped", "cancelled", "charged-nothing", "placed-before-launch"],
+)
+async def test_only_a_completed_paid_order_qualifies_a_referral(
+    session: AsyncSession, order_state: dict[str, object]
+) -> None:
+    """Owner decision: bonuses follow the referred customer's first real purchase."""
+    alice = await make_user(session, telegram_id=7520)
+    bob = await make_user(session, telegram_id=7521)
+    order = await make_order(session, bob)
+    for field, value in order_state.items():
+        setattr(order, field, value)
+    await session.flush()
+    referrals = ReferralService(session)
+    referral = (
+        await referrals.attribute(referrer_user_id=alice.id, referred_user_id=bob.id)
+    ).referral
+
+    with pytest.raises(ValueError):
+        await referrals.qualify(referral.id, order_id=order.id)
+    stored = await referrals.get_for_referred_user(bob.id)
+    assert stored is not None and stored.status == ReferralStatus.PENDING

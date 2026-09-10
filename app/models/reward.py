@@ -55,6 +55,14 @@ class UserReward(Base, TimestampMixin):
             "(source = 'roulette') = (spin_id IS NOT NULL)",
             name="ck_user_rewards_source_matches_spin",
         ),
+        # A used reward records what it was worth; a used free bottle also names
+        # the product it made free. Nothing is recorded before use.
+        CheckConstraint(
+            "((status = 'used') = (discount_amount IS NOT NULL))"
+            " AND ((kind = 'free_bottle' AND status = 'used') = (redeemed_product_id IS NOT NULL))"
+            " AND (discount_amount IS NULL OR discount_amount >= 0)",
+            name="ck_user_rewards_redemption_record",
+        ),
         UniqueConstraint("spin_id", name="uq_user_rewards_spin_id"),
         UniqueConstraint("order_id", name="uq_user_rewards_order_id"),
         # A roulette reward belongs to the customer who spun.
@@ -118,6 +126,13 @@ class UserReward(Base, TimestampMixin):
         nullable=True,
     )
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The redemption record (migration c5d2e8f1a6b3). Order lines keep only the
+    # price charged, so the value a reward gave away is kept here.
+    discount_amount: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    redeemed_product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT", name="fk_user_rewards_redeemed_product"),
+        nullable=True,
+    )
 
     def __repr__(self) -> str:
         return (

@@ -29,11 +29,3 @@ class ReferralRepository(BaseRepository[Referral]):
             .execution_options(populate_existing=True)
         )
         return result.first()
-
-    async def list_by_referrer(self, referrer_user_id: int) -> list[Referral]:
-        result = await self.session.scalars(
-            select(Referral)
-            .where(Referral.referrer_user_id == referrer_user_id)
-            .order_by(Referral.id.asc())
-        )
-        return list(result.all())

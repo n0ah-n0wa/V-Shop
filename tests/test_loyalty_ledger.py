@@ -154,7 +154,7 @@ async def test_a_price_ceiling_must_be_real_money(session: AsyncSession, ceiling
     await loyalty.adjust(user.id, amount=10, note="opening balance")
 
     with pytest.raises((TypeError, ValueError)):
-        await loyalty.redeem_free_bottle(
+        await loyalty.claim_free_bottle(
             user.id,
             stamps_required=10,
             max_item_price=ceiling,  # type: ignore[arg-type]
@@ -184,14 +184,14 @@ async def test_the_account_timestamps_stay_readable_after_a_change(
     assert account.created_at is not None
 
 
-async def test_redeeming_a_free_bottle_spends_stamps_and_issues_the_reward(
+async def test_claiming_a_free_bottle_spends_stamps_and_issues_the_reward(
     session: AsyncSession,
 ) -> None:
     user = await make_user(session, telegram_id=7210)
     loyalty = LoyaltyService(session)
     await loyalty.adjust(user.id, amount=12, note="opening balance")
 
-    reward = await loyalty.redeem_free_bottle(
+    reward = await loyalty.claim_free_bottle(
         user.id, stamps_required=10, max_item_price=Decimal("20")
     )
 
@@ -208,13 +208,13 @@ async def test_redeeming_a_free_bottle_spends_stamps_and_issues_the_reward(
     assert (debit.amount, debit.balance_after, debit.reward_id) == (-10, 2, reward.id)
 
 
-async def test_a_refused_redemption_leaves_nothing_behind(session: AsyncSession) -> None:
+async def test_a_refused_claim_leaves_nothing_behind(session: AsyncSession) -> None:
     user = await make_user(session, telegram_id=7211)
     loyalty = LoyaltyService(session)
     await loyalty.adjust(user.id, amount=9, note="opening balance")
 
     with pytest.raises(InsufficientStampsError):
-        await loyalty.redeem_free_bottle(user.id, stamps_required=10, max_item_price=CEILING)
+        await loyalty.claim_free_bottle(user.id, stamps_required=10, max_item_price=CEILING)
 
     assert await loyalty.balance(user.id) == 9
     assert await count(session, UserReward) == 0
@@ -227,9 +227,9 @@ async def test_twenty_stamps_buy_exactly_two_bottles(session: AsyncSession) -> N
     await loyalty.adjust(user.id, amount=20, note="opening balance")
 
     for _ in range(2):
-        await loyalty.redeem_free_bottle(user.id, stamps_required=10, max_item_price=CEILING)
+        await loyalty.claim_free_bottle(user.id, stamps_required=10, max_item_price=CEILING)
     with pytest.raises(InsufficientStampsError):
-        await loyalty.redeem_free_bottle(user.id, stamps_required=10, max_item_price=CEILING)
+        await loyalty.claim_free_bottle(user.id, stamps_required=10, max_item_price=CEILING)
 
     assert await loyalty.balance(user.id) == 0
     assert await count(session, UserReward) == 2
@@ -263,7 +263,7 @@ async def test_the_ledger_explains_the_balance(session: AsyncSession) -> None:
     await loyalty.record_purchase(user.id, order_id=second_order.id, stamps=1)
     await loyalty.credit_referral(user.id, referral_id=referral_id, stamps=2)
     await loyalty.adjust(user.id, amount=10, note="support gesture")
-    await loyalty.redeem_free_bottle(user.id, stamps_required=10, max_item_price=CEILING)
+    await loyalty.claim_free_bottle(user.id, stamps_required=10, max_item_price=CEILING)
     await loyalty.adjust(user.id, amount=-1, note="correction")
 
     rows = await ledger(session, user.id)

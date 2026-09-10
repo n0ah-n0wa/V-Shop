@@ -15,6 +15,7 @@ from app.repositories.cart_item import CartItemRepository
 from app.repositories.order import OrderRepository
 from app.repositories.order_item import OrderItemRepository
 from app.repositories.product import ProductRepository
+from app.services.reward import FreeBottlePlan, RewardService
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class OrderService:
         preferred_time: str,
         phone: str | None,
         payment_method: PaymentMethod | None = None,
+        reward_id: int | None = None,
     ) -> Order:
         """
         Persist a completed checkout:
@@ -71,6 +73,12 @@ class OrderService:
         3. Clear ``cart_items``
         4. Flush + commit to PostgreSQL
         5. Return the saved order (with items loaded)
+
+        ``reward_id`` redeems one of the customer's free-bottle rewards on this
+        order: one eligible unit is charged €0 and the reward is bound to the
+        order in the same transaction. A reward that is unavailable, not the
+        customer's, or not applicable to the cart is refused before anything is
+        written — see :mod:`app.services.reward`.
         """
         if user.selected_city is None:
             raise ValueError("User city is not set")
@@ -107,6 +115,13 @@ class OrderService:
         if not line_items:
             raise EmptyCartError("Cart is empty")
 
+        rewards = RewardService(self.session)
+        plan: FreeBottlePlan | None = None
+        if reward_id is not None:
+            plan = await rewards.plan_free_bottle(reward_id, user_id=user.id, lines=line_items)
+            line_items = plan.apply(line_items)
+            total -= plan.discount
+
         city_value = (
             user.selected_city.value
             if hasattr(user.selected_city, "value")
@@ -127,6 +142,8 @@ class OrderService:
         )
 
         await self.order_items.add_items(order.id, line_items)
+        if plan is not None:
+            await rewards.redeem(plan, user_id=user.id, order_id=order.id)
         await self.carts.clear(cart)
         await self.session.commit()
 
