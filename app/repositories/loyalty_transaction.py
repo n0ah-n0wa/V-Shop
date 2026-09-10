@@ -5,6 +5,7 @@ from __future__ import annotations
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.enums import LoyaltyTransactionType
 from app.models.loyalty import LoyaltyTransaction
 from app.repositories.base import BaseRepository
 
@@ -60,6 +61,19 @@ class LoyaltyTransactionRepository(BaseRepository[LoyaltyTransaction]):
             )
         )
         return int(value or 0)
+
+    async def has_redemption_after(self, user_id: int, after_id: int) -> bool:
+        """Whether the customer spent stamps on a reward in a row newer than ``after_id``."""
+        found = await self.session.scalar(
+            select(LoyaltyTransaction.id)
+            .where(
+                LoyaltyTransaction.user_id == user_id,
+                LoyaltyTransaction.kind == LoyaltyTransactionType.REDEMPTION,
+                LoyaltyTransaction.id > after_id,
+            )
+            .limit(1)
+        )
+        return found is not None
 
     async def latest_id_for_user(self, user_id: int) -> int:
         """The newest row's id, 0 if none. Served by ix_loyalty_transactions_user_id_id."""

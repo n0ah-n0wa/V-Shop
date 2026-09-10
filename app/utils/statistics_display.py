@@ -40,7 +40,11 @@ def group_digits(digits: str, separator: str) -> str:
 
 
 def format_amount(
-    amount: Decimal, i18n: LocalizationService, currency: str = DEFAULT_CURRENCY
+    amount: Decimal,
+    i18n: LocalizationService,
+    currency: str = DEFAULT_CURRENCY,
+    *,
+    trim_zero_cents: bool = False,
 ) -> str:
     """
     Money in the reader's own convention.
@@ -48,14 +52,16 @@ def format_amount(
     Separators and the position of the symbol both come from the locale
     catalog: English wants ``€1,234.56``, German ``1.234,56 €``. A single global
     format would read as a different number to half the audience.
+
+    ``trim_zero_cents`` prints a whole amount without its cents — ``€20``
+    rather than ``€20.00`` — for prose, where the zeros are only noise.
     """
     quantized = amount.quantize(Decimal("0.01"))
     whole, _, fraction = f"{abs(quantized):f}".partition(".")
-    number = (
-        group_digits(whole, i18n.t("format.group_separator"))
-        + i18n.t("format.decimal_separator")
-        + (fraction or "00").ljust(2, "0")
-    )
+    cents = (fraction or "00").ljust(2, "0")
+    number = group_digits(whole, i18n.t("format.group_separator"))
+    if not (trim_zero_cents and cents == "00"):
+        number += i18n.t("format.decimal_separator") + cents
     sign = "-" if quantized < 0 else ""
     return i18n.t("format.money", amount=f"{sign}{number}", currency=currency)
 

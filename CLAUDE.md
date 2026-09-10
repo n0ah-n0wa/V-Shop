@@ -79,6 +79,7 @@ Outer middleware order is significant and set in [app/middlewares/__init__.py](a
 - `OrderService.place_order_from_cart` — commits so the order is durable before manager notifications go out. It takes a `SELECT … FOR UPDATE` on the cart row (`CartRepository.get_by_user_id_with_items(..., for_update=True)`).
 - Admin order status change ([app/handlers/admin/orders.py](app/handlers/admin/orders.py)) — commits *before* `CustomerOrderNotificationService` tells the customer; that service swallows all Telegram failures so they can never undo the status.
 - Broadcast confirm — commits to release the transaction before the long Telegram fan-out.
+- Stamp card claim ([app/handlers/user/stamp_card.py](app/handlers/user/stamp_card.py)) — commits inside a per-customer `keyed_lock` before answering, so a second tap sees the first claim's outcome.
 
 ### Loyalty persistence
 
@@ -92,7 +93,7 @@ Six tables (`loyalty_accounts`, `loyalty_transactions` = stamp ledger, `roulette
 - `LoyaltyAccount` sets `eager_defaults=True` so the DB-maintained `updated_at` is fetched back on UPDATE; without it, reading the attribute after a flush raises `MissingGreenlet`.
 - The loyalty migration's downgrade refuses while customer loyalty data exists; `alembic -x allow_loyalty_data_loss=true downgrade …` overrides it (dump first).
 - Business rules sit above the ledger, which takes amounts as arguments. Stamp-card rules live in `StampCardService` / `StampCardPolicy` (`app/services/stamp_card.py`, fed by the `LOYALTY_*` settings). Stamps are awarded only from `AdminOrderService.set_order_status` on `Completed` — same transaction, order row locked — never from outside `app/services/`. `tests/test_stamp_card.py` pins each booking call to its single caller and requires the status-change handler to build `AdminService(session, settings=settings)`: without `settings`, completion silently applies the default rules. Only orders with `orders.loyalty_eligible` (placed after launch) earn, and `ReferralService.qualify` accepts only a Completed, paid, eligible order.
-- Free bottles (stamp card or roulette — same `user_rewards` row) are redeemed only at checkout: `OrderService.place_order_from_cart(reward_id=…)` → `RewardService.plan_free_bottle` (validates and picks the dearest product within the cap, before any write) → order with that unit at €0 → `RewardService.redeem` records `discount_amount` + `redeemed_product_id`. Claims take `card_version` (latest ledger id) so one rendered card claims once.
+- Free bottles (stamp card or roulette — same `user_rewards` row) are redeemed only at checkout: `OrderService.place_order_from_cart(reward_id=…)` → `RewardService.plan_free_bottle` (validates and picks the dearest product within the cap, before any write) → order with that unit at €0 → `RewardService.redeem` records `discount_amount` + `redeemed_product_id`. Claims take `card_version` (latest ledger id) so one rendered card claims once; a card already used to claim raises `AlreadyClaimedError` (a `StaleCardError`). The 🪪 My Stamp Card screen renders only `StampCard` properties and passes `card_version` in its claim callback. Checkout screens do not offer a saved bottle yet.
 - SQLite ignores `FOR UPDATE`. Concurrency is only proven by the opt-in `tests/test_loyalty_postgres.py` (`VSHOP_TEST_POSTGRES_URL`, database name must end in `_test` and be empty — it creates and drops the schema); `tests/test_loyalty_scenarios.py` checks on every run that each redemption path takes the account lock before its first write, alongside the owner's other end-to-end scenarios. `loyalty_health` in `app/verify_deployment.py` cross-checks the tables after a deploy.
 
 ### Router composition
@@ -124,7 +125,7 @@ Statistics month boundaries use `APP_TIMEZONE` ([app/utils/periods.py](app/utils
 
 ### Callback data
 
-Namespaced colon-delimited strings declared as `CALLBACK_*` constants in `app/keyboards/*.py` and imported by handlers — never re-typed as literals. Namespaces: `lang:`, `city:`, `catalog:`, `category:`, `subcat:`, `prod:`, `cart:`, `checkout:`, `info:`, and admin `admin:product:`, `admin:cat:`, `admin:sub:`, `admin:ord:`, `admin:bc:`, `admin:st:`. Keep them short — Telegram caps callback data at 64 bytes. Page sizes (`PRODUCTS_PAGE_SIZE`, `ORDERS_PAGE_SIZE`) also live in the keyboard modules, alongside `clamp_page`/`page_count` helpers in [app/utils/telegram_ui.py](app/utils/telegram_ui.py).
+Namespaced colon-delimited strings declared as `CALLBACK_*` constants in `app/keyboards/*.py` and imported by handlers — never re-typed as literals. Namespaces: `lang:`, `city:`, `catalog:`, `category:`, `subcat:`, `prod:`, `cart:`, `checkout:`, `info:`, `stamp:`, and admin `admin:product:`, `admin:cat:`, `admin:sub:`, `admin:ord:`, `admin:bc:`, `admin:st:`. Keep them short — Telegram caps callback data at 64 bytes. Page sizes (`PRODUCTS_PAGE_SIZE`, `ORDERS_PAGE_SIZE`) also live in the keyboard modules, alongside `clamp_page`/`page_count` helpers in [app/utils/telegram_ui.py](app/utils/telegram_ui.py).
 
 ### FSM and double-submit protection
 

@@ -22,10 +22,11 @@ from enum import StrEnum
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.models.enums import OrderStatus
+from app.models.enums import OrderStatus, RewardType
 from app.models.loyalty import LoyaltyTransaction
 from app.models.reward import UserReward
 from app.repositories.order import OrderRepository
+from app.repositories.user_reward import UserRewardRepository
 from app.services.loyalty import LoyaltyService
 from app.utils.validators import to_money
 
@@ -100,13 +101,15 @@ class PurchaseAward:
 
 @dataclass(frozen=True, slots=True)
 class StampCard:
-    """What the customer's card shows."""
+    """What the customer's card shows — every figure decided here, none by the UI."""
 
     stamps: int
     stamps_required: int
     # The ledger version the card was read at; pass it back when claiming so
     # one rendered card can be claimed at most once (a double tap is refused).
     version: int = 0
+    # Free-bottle rewards already claimed (from any source) and not used yet.
+    free_bottles_waiting: int = 0
 
     @property
     def free_bottles_unlocked(self) -> int:
@@ -121,12 +124,33 @@ class StampCard:
     def can_claim(self) -> bool:
         return self.stamps >= self.stamps_required
 
+    @property
+    def filled(self) -> int:
+        """Stamps on the current card: a full card stays full until it is claimed."""
+        return min(self.stamps, self.stamps_required)
+
+    @property
+    def remaining(self) -> int:
+        """Stamps still needed to unlock a free bottle; 0 once one can be claimed."""
+        return max(self.stamps_required - self.stamps, 0)
+
+    @property
+    def extra_stamps(self) -> int:
+        """Stamps beyond a full card — they stay on the balance for the next one."""
+        return max(self.stamps - self.stamps_required, 0)
+
+    @property
+    def free_bottle_number(self) -> int:
+        """The bottle a full card pays for: 10 stamps → the 11th is free."""
+        return self.stamps_required + 1
+
 
 class StampCardService:
     def __init__(self, session: AsyncSession, policy: StampCardPolicy | None = None) -> None:
         self.session = session
         self.policy = policy or StampCardPolicy.defaults()
         self.orders = OrderRepository(session)
+        self.rewards = UserRewardRepository(session)
         self.loyalty = LoyaltyService(session)
 
     async def award_for_order(self, order_id: int) -> PurchaseAward:
@@ -183,6 +207,9 @@ class StampCardService:
             stamps=await self.loyalty.balance(user_id),
             stamps_required=self.policy.stamps_required,
             version=await self.loyalty.ledger_version(user_id),
+            free_bottles_waiting=await self.rewards.count_available(
+                user_id, RewardType.FREE_BOTTLE
+            ),
         )
 
     async def claim_free_bottle(
@@ -196,7 +223,9 @@ class StampCardService:
 
         Raises :class:`~app.services.loyalty.InsufficientStampsError` below the
         requirement, and :class:`~app.services.loyalty.StaleCardError` when
-        ``card_version`` no longer matches the ledger. The price cap is
+        ``card_version`` no longer matches the ledger —
+        :class:`~app.services.loyalty.AlreadyClaimedError` when that card was
+        already used to claim. The price cap is
         snapshotted onto the reward, which is then redeemed at checkout by
         :class:`~app.services.reward.RewardService` — the same path a roulette
         free bottle takes.

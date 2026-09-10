@@ -88,6 +88,10 @@ threshold is at least `1.00` — a mistyped `0.2` would otherwise stamp every
 order a hundredfold. An invalid value stops the bot at startup, never at the
 first completed order.
 
+The customer's 🪪 My Stamp Card shows these values. Its promo — "get your 11th
+bottle free" — is worded for `LOYALTY_STAMPS_REQUIRED` between 10 and 19 in all
+four languages; outside that range, review the `stamp_card.promo` strings.
+
 ## Docker Compose extras
 
 Compose can override DB credentials via:

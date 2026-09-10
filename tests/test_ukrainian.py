@@ -53,7 +53,16 @@ def test_ukrainian_covers_every_user_facing_area() -> None:
             "onboarding.choose_city",
             "onboarding.city_saved",
         ],
-        "main menu": ["menu.catalog", "menu.cart", "menu.info"],
+        "main menu": ["menu.catalog", "menu.cart", "menu.stamp_card", "menu.info"],
+        "stamp card": [
+            "stamp_card.title",
+            "stamp_card.how",
+            "stamp_card.empty",
+            "stamp_card.claim",
+            "stamp_card.claimed",
+            "stamp_card.already_claimed",
+            "stamp_card.changed",
+        ],
         "catalog": ["catalog.choose_category", "catalog.empty", "catalog.category_empty"],
         "cart": ["cart.title", "cart.empty", "cart.checkout", "cart.item_removed"],
         "checkout": [

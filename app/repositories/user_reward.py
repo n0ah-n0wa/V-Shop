@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import RewardStatus
+from app.models.enums import RewardStatus, RewardType
 from app.models.reward import UserReward
 from app.repositories.base import BaseRepository
 
@@ -38,6 +38,19 @@ class UserRewardRepository(BaseRepository[UserReward]):
             .order_by(UserReward.id.asc())
         )
         return list(result.all())
+
+    async def count_available(self, user_id: int, kind: RewardType) -> int:
+        """Rewards of ``kind`` the customer holds and has not used yet."""
+        value = await self.session.scalar(
+            select(func.count())
+            .select_from(UserReward)
+            .where(
+                UserReward.user_id == user_id,
+                UserReward.kind == kind,
+                UserReward.status == RewardStatus.AVAILABLE,
+            )
+        )
+        return int(value or 0)
 
     async def get_for_order(self, order_id: int) -> UserReward | None:
         result = await self.session.scalars(

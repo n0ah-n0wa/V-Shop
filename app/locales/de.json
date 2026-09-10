@@ -33,7 +33,8 @@
   "menu": {
     "catalog": "🛍 Katalog",
     "cart": "🛒 Warenkorb",
-    "info": "ℹ Informationen"
+    "info": "ℹ Informationen",
+    "stamp_card": "🪪 Meine Stempelkarte"
   },
   "catalog": {
     "title": "🛍 Katalog",
@@ -145,6 +146,25 @@
     "reviews_text": "⭐ <b>Bewertungen</b>\n\nIn unserer Kundengruppe finden Sie Bewertungen, Fragen und Neuigkeiten.\nTippen Sie unten, um beizutreten.",
     "reviews_open": "⭐ Bewertungsgruppe öffnen",
     "reviews_unavailable": "⭐ Die Bewertungsgruppe ist vorübergehend nicht erreichbar. Bitte versuchen Sie es später erneut."
+  },
+  "stamp_card": {
+    "title": "<b>🪪 Meine Stempelkarte</b>",
+    "progress": "[{bar}] <b>{filled}/{required}</b>",
+    "promo": "Kaufen Sie Liquid für {amount}, sammeln Sie Stempel und erhalten Sie die {next}. Flasche gratis! 🎁",
+    "remaining": "🎯 Stempel bis zur Gratisflasche: <b>{remaining}</b>",
+    "empty": "Noch keine Stempel — starten Sie mit Ihrer nächsten Bestellung!",
+    "ready": "🎉 <b>Ihre Gratisflasche ist bereit!</b>",
+    "ready_hint": "Tippen Sie unten auf „{button}“.",
+    "extra": "➕ Stempel für Ihre nächste Karte: <b>{extra}</b>",
+    "waiting": "🎁 Gratisflaschen auf Ihrer Karte: <b>{count}</b>",
+    "how": "<i>1 Stempel für je {amount} einer abgeschlossenen Bestellung.</i>",
+    "claim": "🎁 Gratisflasche sichern",
+    "refresh": "🔄 Aktualisieren",
+    "up_to_date": "✅ Ihre Karte ist aktuell.",
+    "claimed": "🎁 Gratisflasche gesichert! Sie ist auf Ihrer Karte gespeichert.",
+    "already_claimed": "✅ Diese Gratisflasche haben Sie bereits gesichert.",
+    "changed": "🔄 Ihre Stempelkarte hat sich geändert — hier ist der aktuelle Stand.",
+    "not_enough": "🎯 Für eine Gratisflasche fehlen Ihnen noch Stempel."
   },
   "error": {
     "generic": "⚠️ Ein unerwarteter Fehler ist aufgetreten. Bitte versuche es später erneut.",

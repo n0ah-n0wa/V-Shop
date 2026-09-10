@@ -29,6 +29,8 @@ catalog, orders, statistics and broadcasts — from inside Telegram.
 - Checkout captures delivery method (city-gated), address, preferred time,
   contact, and payment method (`cash` / `card`)
 - Order status notifications in the customer's own language
+- 🪪 My Stamp Card: a stamp for every €20 of a completed order (configurable);
+  a full card of 10 unlocks a free bottle, claimed with one tap
 - Information pages, and an invite link to the private reviews group
 - Language and city can be changed at any time from Information
 

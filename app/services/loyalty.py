@@ -61,6 +61,10 @@ class StaleCardError(LoyaltyError):
     """The card a claim was made from no longer matches the ledger — e.g. a double tap."""
 
 
+class AlreadyClaimedError(StaleCardError):
+    """The card a claim was made from has already been used to claim a free bottle."""
+
+
 @dataclass(frozen=True, slots=True)
 class LedgerPosting:
     """A ledger row, and whether this call created it (``False``: already booked)."""
@@ -242,7 +246,8 @@ class LoyaltyService:
         overdraw it. A customer holding 20 stamps may claim twice; to make one
         *card* claimable once, pass ``expected_version`` — the
         :meth:`ledger_version` the card was rendered from. Any movement since
-        (including the first tap of a double tap) raises :class:`StaleCardError`.
+        raises :class:`StaleCardError`; when that movement was itself a claim
+        (the first tap of a double tap), :class:`AlreadyClaimedError`.
         """
         if stamps_required <= 0:
             raise ValueError("A redemption must cost at least one stamp")
@@ -252,6 +257,11 @@ class LoyaltyService:
         if expected_version is not None:
             current = await self.transactions.latest_id_for_user(user_id)
             if current != expected_version:
+                if await self.transactions.has_redemption_after(user_id, expected_version):
+                    raise AlreadyClaimedError(
+                        f"User {user_id} already claimed a reward from the card "
+                        f"at version {expected_version}"
+                    )
                 raise StaleCardError(
                     f"User {user_id}'s card changed since it was shown "
                     f"(version {expected_version}, now {current})"

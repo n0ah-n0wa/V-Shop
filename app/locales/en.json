@@ -33,7 +33,8 @@
   "menu": {
     "catalog": "🛍 Catalog",
     "cart": "🛒 Cart",
-    "info": "ℹ Information"
+    "info": "ℹ Information",
+    "stamp_card": "🪪 My Stamp Card"
   },
   "catalog": {
     "title": "🛍 Catalog",
@@ -145,6 +146,25 @@
     "reviews_text": "⭐ <b>Reviews</b>\n\nOur customer group is the place for reviews, questions and news.\nTap below to join.",
     "reviews_open": "⭐ Open the reviews group",
     "reviews_unavailable": "⭐ The reviews group is temporarily unavailable. Please try again a little later."
+  },
+  "stamp_card": {
+    "title": "<b>🪪 My Stamp Card</b>",
+    "progress": "[{bar}] <b>{filled}/{required}</b>",
+    "promo": "Buy e-liquid for {amount}, collect stamps and get your {next}th bottle free! 🎁",
+    "remaining": "🎯 Stamps to your free bottle: <b>{remaining}</b>",
+    "empty": "No stamps yet — start collecting with your next order!",
+    "ready": "🎉 <b>Your free bottle is ready!</b>",
+    "ready_hint": "Tap “{button}” below.",
+    "extra": "➕ Extra stamps for your next card: <b>{extra}</b>",
+    "waiting": "🎁 Free bottles saved on your card: <b>{count}</b>",
+    "how": "<i>1 stamp for every {amount} of a completed order.</i>",
+    "claim": "🎁 Claim Free Bottle",
+    "refresh": "🔄 Refresh",
+    "up_to_date": "✅ Your card is up to date.",
+    "claimed": "🎁 Your free bottle is claimed and saved on your card!",
+    "already_claimed": "✅ You have already claimed this free bottle.",
+    "changed": "🔄 Your stamp card has changed — here is the latest version.",
+    "not_enough": "🎯 You don't have enough stamps for a free bottle yet."
   },
   "error": {
     "generic": "⚠️ An unexpected error occurred. Please try again later.",

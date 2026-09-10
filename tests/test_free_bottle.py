@@ -33,7 +33,12 @@ from app.repositories.loyalty_transaction import LoyaltyTransactionRepository
 from app.repositories.order_item import OrderItemRepository
 from app.services.admin import AdminService
 from app.services.cart import CartService
-from app.services.loyalty import InsufficientStampsError, LoyaltyService, StaleCardError
+from app.services.loyalty import (
+    AlreadyClaimedError,
+    InsufficientStampsError,
+    LoyaltyService,
+    StaleCardError,
+)
 from app.services.order import OrderService
 from app.services.reward import (
     FreeBottlePlan,
@@ -44,7 +49,7 @@ from app.services.reward import (
     choose_free_bottle,
 )
 from app.services.roulette import RoulettePrize, RouletteService
-from app.services.stamp_card import PurchaseAwardStatus, StampCardService
+from app.services.stamp_card import PurchaseAwardStatus, StampCard, StampCardService
 from tests.factories import add_order_item, make_category, make_order, make_product, make_user
 
 CEILING = Decimal("20.00")
@@ -216,6 +221,65 @@ async def test_one_card_cannot_be_claimed_twice(session: AsyncSession) -> None:
     fresh = await stamp_card.card(user.id)
     await stamp_card.claim_free_bottle(user.id, card_version=fresh.version)
     assert await balance(session, user.id) == 0
+
+
+async def test_a_card_already_used_for_a_claim_says_so(session: AsyncSession) -> None:
+    """The first tap of a double tap is a claim; the second learns exactly that."""
+    user = await make_user(session, telegram_id=8121)
+    await give_stamps(session, user, 20)
+    stamp_card = StampCardService(session)
+    card = await stamp_card.card(user.id)
+    await stamp_card.claim_free_bottle(user.id, card_version=card.version)
+
+    with pytest.raises(AlreadyClaimedError):
+        await stamp_card.claim_free_bottle(user.id, card_version=card.version)
+
+    fresh = await stamp_card.card(user.id)
+    await give_stamps(session, user, 1)  # moved by something other than a claim
+    with pytest.raises(StaleCardError) as refused:
+        await stamp_card.claim_free_bottle(user.id, card_version=fresh.version)
+    assert not isinstance(refused.value, AlreadyClaimedError)
+    assert await count(session, UserReward) == 1
+
+
+@pytest.mark.parametrize(
+    ("stamps", "filled", "remaining", "extra", "unlocked", "can_claim"),
+    [
+        (0, 0, 10, 0, 0, False),
+        (2, 2, 8, 0, 0, False),
+        (9, 9, 1, 0, 0, False),
+        (10, 10, 0, 0, 1, True),
+        (13, 10, 0, 3, 1, True),
+        (25, 10, 0, 15, 2, True),
+    ],
+)
+def test_the_card_states_every_figure_the_screen_shows(
+    stamps: int, filled: int, remaining: int, extra: int, unlocked: int, can_claim: bool
+) -> None:
+    card = StampCard(stamps=stamps, stamps_required=10)
+
+    assert (
+        card.filled,
+        card.remaining,
+        card.extra_stamps,
+        card.free_bottles_unlocked,
+        card.can_claim,
+    ) == (filled, remaining, extra, unlocked, can_claim)
+    assert card.free_bottle_number == 11
+
+
+async def test_the_card_counts_free_bottles_waiting_until_used(session: AsyncSession) -> None:
+    user = await make_user(session, telegram_id=8122)
+    await give_stamps(session, user, 20)
+    stamp_card = StampCardService(session)
+    first = await stamp_card.claim_free_bottle(user.id)
+    await stamp_card.claim_free_bottle(user.id)
+    assert (await stamp_card.card(user.id)).free_bottles_waiting == 2
+
+    (bottle,) = await products(session, "20.00")
+    await checkout(session, user, [(bottle, 1)], reward_id=first.id)
+
+    assert (await stamp_card.card(user.id)).free_bottles_waiting == 1
 
 
 async def test_a_failed_claim_leaves_stamps_and_rewards_untouched(

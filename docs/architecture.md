@@ -188,7 +188,9 @@ Two steps, one reward row (`user_rewards`) whatever the source:
 root
  ├── user router
 │   ├── /start onboarding
-│   ├── catalog / cart / checkout
+│   ├── catalog / cart
+│   ├── my stamp card
+│   ├── checkout
 │   ├── information
 │   └── /admin access-denied for non-admins
 └── admin router  (IsAdmin filter + AdminOnlyMiddleware)
@@ -206,7 +208,7 @@ root
 
 ### Onboarding
 
-`/start` → ensure user row → choose language → choose city → main reply keyboard (Catalog / Cart / Info).
+`/start` → ensure user row → choose language → choose city → main reply keyboard (Catalog / Cart / My Stamp Card / Info).
 
 ### Catalog → cart
 
@@ -217,6 +219,28 @@ Catalog → categories → product cards → add to cart → cart (± quantity, 
 Name → delivery type (city-dependent) → address → preferred time → phone (contact share or typed) → confirmation → `OrderService.place_order_from_cart` → notify `MANAGER_CHAT_ID` + `ADMIN_IDS`.
 
 Cart row is locked with `SELECT … FOR UPDATE` during placement; FSM `submitted` + process lock reduce double-taps.
+
+### My Stamp Card
+
+🪪 My Stamp Card (`app/handlers/user/stamp_card.py`) draws the card from
+`StampCardService.card`, in the order a customer reads it on a phone: the
+progress bar toward `LOYALTY_STAMPS_REQUIRED`; the promo directly beneath it;
+what to do next (stamps still needed, or a ready card naming the button to tap),
+extra stamps and free bottles already saved; and one italic line on how stamps
+are earned (`LOYALTY_STAMP_PURCHASE_THRESHOLD`, in the reader's money format,
+without zero cents). Every figure is a `StampCard` property — the screen
+computes nothing. Opening it is read-only, so repeats are harmless. Below the
+card, 🛍 Catalog is the next step and 🔄 Refresh redraws it in place, answering
+"up to date" when nothing changed.
+
+On a full card the backend enables 🎁 Claim Free Bottle. Its callback carries
+the card's version (latest ledger id); `StampCardService.claim_free_bottle`
+decides under the account lock, and the claim is committed — inside a
+per-customer `keyed_lock` — before the customer is told. A double tap is
+answered "already claimed" (`AlreadyClaimedError`), a card that changed
+meanwhile is redrawn (`StaleCardError`), and a malformed payload is refused
+before the database is touched. The checkout screens do not offer a saved bottle
+yet; `place_order_from_cart(reward_id=…)` supports it at the service level.
 
 ## Admin services (SOLID split)
 
