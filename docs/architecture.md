@@ -115,7 +115,8 @@ layer; the tables are described in [database-schema.md](database-schema.md#loyal
 | `LoyaltyService` (`app/services/loyalty.py`) | accounts, the stamp ledger, exchanging stamps for a free-bottle reward |
 | `RouletteService` (`app/services/roulette.py`) | spin grants, and spending a grant on a prize |
 | `RewardService` (`app/services/reward.py`) | listing rewards, binding one to an order |
-| `ReferralService` (`app/services/referral.py`) | referral codes, attribution, qualification |
+| `ReferralService` (`app/services/referral.py`) | referral codes, deep links, attribution, qualification |
+| `ReferralProgramService` (`app/services/referral_program.py`) | the programme: attribution at `/start`, the payout at the first paid order |
 
 Three rules hold it together:
 
@@ -236,6 +237,38 @@ wired yet.
 - **Real rewards.** A discount is a redeemable `user_rewards` row, used once at
   checkout; a free bottle is the same kind of row the stamp card issues. Prize
   display names are the locale keys `roulette.prize.<code>`.
+
+## Referral programme
+
+`ReferralProgramService` (`app/services/referral_program.py`) runs it on top of
+`ReferralService`. `ReferralPolicy` carries `REFERRAL_REWARD_STAMPS` and
+`REFERRED_USER_START_STAMPS`; `REFERRAL_SPINS` decides the referrer's spin.
+
+- **Link.** A customer's code is `secrets.token_urlsafe(9)` — 12 random
+  URL-safe characters, stored once in `loyalty_accounts.referral_code` (unique),
+  never derived from an id and never expiring. The link is Telegram's deep link
+  `https://t.me/<bot>?start=ref_<code>` (`referral_link`).
+- **Attribution.** `cmd_start` hands whatever followed `/start` to
+  `attribute_from_start`, which never raises for client input: a missing,
+  malformed (`parse_referral_payload`), unknown or own code, a customer who
+  already has a referrer, one who has ever placed an order, or a referral that
+  would close a loop anywhere up the chain is an outcome, and nothing is
+  written. Otherwise a `pending` referral is recorded — one per referred
+  customer (unique), never changed. Nothing is paid at sign-up. Attributions
+  are serialised by a PostgreSQL advisory lock held to the end of the
+  transaction, so the loop check sees every committed referral — two new
+  customers opening each other's links at once cannot refer each other. The
+  `Referral` model refuses any change to its parties or qualifying order, and
+  any step back from `qualified`.
+- **Payout.** `AdminOrderService.set_order_status` on `Completed`, after the
+  stamp award and the milestone spin, calls `settle_for_completed_order`. The
+  referred customer's first Completed, paid, post-launch order qualifies the
+  referral (the row is locked and `qualifying_order_id` is unique); then each
+  side gets its stamps — one `referral` ledger row per side, unique per
+  referral and customer — and the referrer the spin, unique per referral. It
+  shares the status change's transaction: all or nothing. A replayed
+  completion, a second order or a race pays nothing more. `loyalty_health`
+  reports any bonus booked before its referral qualified.
 
 ## Routing
 

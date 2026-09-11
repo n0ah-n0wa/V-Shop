@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,7 @@ from app.keyboards.reply import main_menu_keyboard
 from app.models.enums import CityChoice, LanguageCode
 from app.models.user import User
 from app.services.localization import LocalizationService
+from app.services.referral_program import ReferralPolicy, ReferralProgramService
 from app.services.spin_entitlement import SpinEntitlementService, SpinPolicy
 from app.services.user import UserService
 from app.states.onboarding import OnboardingStates
@@ -82,12 +83,14 @@ async def cmd_start(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    command: CommandObject | None = None,
 ) -> None:
     """
     Entry point.
 
     First launch: language → city → main menu.
     Returning users skip steps already saved in the database.
+    A friend's referral link arrives as ``/start ref_<code>``.
     """
     if message.from_user is None:
         return
@@ -99,6 +102,13 @@ async def cmd_start(
     await SpinEntitlementService(session, SpinPolicy.from_settings(settings)).grant_welcome_spin(
         user.id
     )
+    if command is not None and command.args:
+        # Untrusted: anything that is not a valid, applicable referral is an
+        # outcome, never an error, and onboarding carries on regardless.
+        attempt = await ReferralProgramService(
+            session, ReferralPolicy.from_settings(settings)
+        ).attribute_from_start(user.id, command.args)
+        logger.info("/start referral telegram_id=%s outcome=%s", user.telegram_id, attempt.outcome)
     i18n = LocalizationService.from_user(user)
 
     logger.info(

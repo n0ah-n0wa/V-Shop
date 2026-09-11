@@ -58,7 +58,8 @@ from app.services.loyalty import (
     StaleCardError,
 )
 from app.services.order import EmptyCartError, OrderService
-from app.services.referral import ReferralAttribution, ReferralService
+from app.services.referral import ReferralAttribution, ReferralService, referral_payload
+from app.services.referral_program import ReferralOutcome, ReferralProgramService
 from app.services.reward import RewardService, RewardUnavailableError
 from app.services.roulette import RoulettePrize, RouletteService, SpinGrantResult, SpinOutcome
 from app.services.roulette_engine import RouletteEngine, RoulettePolicy
@@ -746,3 +747,169 @@ async def test_a_first_start_delivered_many_times_onboards_once(pg: Factory) -> 
     assert await scalar(pg, select(func.count()).select_from(User)) == 1
     assert await scalar(pg, select(func.count()).select_from(Cart)) == 1
     assert await scalar(pg, select(func.count()).select_from(RouletteSpinGrant)) == 1
+
+
+# ----------------------------------------------------------------- referrals
+
+
+async def test_a_first_start_through_a_link_attributes_once(pg: Factory) -> None:
+    """A brand-new customer's /start ref_<code>, delivered many times at once."""
+
+    async def build(session: AsyncSession) -> str:
+        referrer = await make_user(session, telegram_id=9021)
+        return referral_payload(await ReferralProgramService(session).referral_code(referrer.id))
+
+    payload: str = await seed(pg, build)
+    newcomer = TgUser(id=9022, is_bot=False, first_name="Friend")
+
+    async def start(session: AsyncSession, _: int) -> ReferralOutcome:
+        user = await UserService(session).ensure_user(newcomer)
+        attempt = await ReferralProgramService(session).attribute_from_start(user.id, payload)
+        return attempt.outcome
+
+    results = await race(pg, start)
+
+    assert errors(results) == []
+    assert results.count(ReferralOutcome.ATTRIBUTED) == 1
+    assert results.count(ReferralOutcome.ALREADY_REFERRED) == RACERS - 1
+    assert await scalar(pg, select(func.count()).select_from(Referral)) == 1
+
+
+async def _referred_customer(
+    pg: Factory, telegram_id: int, *, shipped: int
+) -> tuple[int, int, list[int]]:
+    """A referrer, their attributed friend, and the friend's shipped €20 orders."""
+
+    async def build(session: AsyncSession) -> tuple[int, int, list[int]]:
+        referrer = await make_user(session, telegram_id=telegram_id)
+        friend = await make_user(session, telegram_id=telegram_id + 1)
+        await ReferralService(session).attribute(
+            referrer_user_id=referrer.id, referred_user_id=friend.id
+        )
+        orders = []
+        for _ in range(shipped):
+            order = await make_order(session, friend, status=OrderStatus.SHIPPED)
+            order.total_price = Decimal("20.00")
+            orders.append(order)
+        await session.flush()
+        return referrer.id, friend.id, [order.id for order in orders]
+
+    result: tuple[int, int, list[int]] = await seed(pg, build)
+    return result
+
+
+async def _paid_once(pg: Factory, referrer_id: int, friend_id: int) -> None:
+    for user_id in (referrer_id, friend_id):
+        bonuses = await scalar(
+            pg,
+            select(func.count())
+            .select_from(LoyaltyTransaction)
+            .where(
+                LoyaltyTransaction.user_id == user_id,
+                LoyaltyTransaction.kind == LoyaltyTransactionType.REFERRAL,
+            ),
+        )
+        assert bonuses == 1, f"user {user_id}: exactly one referral bonus"
+    spins = await scalar(
+        pg,
+        select(func.count())
+        .select_from(RouletteSpinGrant)
+        .where(RouletteSpinGrant.reason == SpinGrantReason.REFERRAL),
+    )
+    assert spins == 1
+    async with pg() as session:
+        loyalty = LoyaltyService(session)
+        assert await loyalty.balance(referrer_id) == 2
+        assert await loyalty.balance(friend_id) == await loyalty.ledger_balance(friend_id)
+
+
+async def test_racing_completions_of_the_first_order_pay_the_referral_once(pg: Factory) -> None:
+    referrer_id, friend_id, (order_id,) = await _referred_customer(pg, 9023, shipped=1)
+
+    results = await race(pg, lambda s, _: _set_status(s, order_id, OrderStatus.COMPLETED))
+
+    assert errors(results) == []
+    await _paid_once(pg, referrer_id, friend_id)
+
+
+async def test_two_first_orders_completing_together_pay_the_referral_once(pg: Factory) -> None:
+    """Which order qualifies the referral is settled under its row lock, not by luck."""
+    referrer_id, friend_id, orders = await _referred_customer(pg, 9025, shipped=2)
+
+    results = await race(pg, lambda s, i: _set_status(s, orders[i % 2], OrderStatus.COMPLETED))
+
+    assert errors(results) == []
+    await _paid_once(pg, referrer_id, friend_id)
+    qualifying = await scalar(
+        pg, select(Referral.qualifying_order_id).where(Referral.referred_user_id == friend_id)
+    )
+    assert qualifying in orders
+
+
+async def test_crossed_links_opened_together_never_form_a_loop(pg: Factory) -> None:
+    """Two brand-new customers open each other's link at the same moment."""
+
+    async def build(session: AsyncSession) -> tuple[int, int, str, str]:
+        alice = await make_user(session, telegram_id=9027)
+        bob = await make_user(session, telegram_id=9028)
+        programme = ReferralProgramService(session)
+        return (
+            alice.id,
+            bob.id,
+            referral_payload(await programme.referral_code(alice.id)),
+            referral_payload(await programme.referral_code(bob.id)),
+        )
+
+    alice_id, bob_id, alice_link, bob_link = await seed(pg, build)
+
+    async def open_link(session: AsyncSession, index: int) -> ReferralOutcome:
+        programme = ReferralProgramService(session)
+        if index % 2 == 0:
+            return (await programme.attribute_from_start(alice_id, bob_link)).outcome
+        return (await programme.attribute_from_start(bob_id, alice_link)).outcome
+
+    results = await race(pg, open_link)
+
+    assert errors(results) == []
+    assert await scalar(pg, select(func.count()).select_from(Referral)) == 1, (
+        "one direction wins; the other would close a loop"
+    )
+    assert results.count(ReferralOutcome.ATTRIBUTED) == 1
+
+
+async def test_a_chain_closed_from_both_ends_at_once_never_loops(pg: Factory) -> None:
+    """
+    Alice referred Bob and Carol referred Dave. At the same moment Carol opens
+    Bob's link and Alice opens Dave's: both would close Alice → Bob → Carol →
+    Dave → Alice. Locking only the two customers of each referral cannot see
+    that — the two attempts share nobody.
+    """
+
+    async def build(session: AsyncSession) -> tuple[int, int, str, str]:
+        alice, bob, carol, dave = [await make_user(session, telegram_id=9029 + i) for i in range(4)]
+        referrals = ReferralService(session)
+        await referrals.attribute(referrer_user_id=alice.id, referred_user_id=bob.id)
+        await referrals.attribute(referrer_user_id=carol.id, referred_user_id=dave.id)
+        programme = ReferralProgramService(session)
+        return (
+            alice.id,
+            carol.id,
+            referral_payload(await programme.referral_code(bob.id)),
+            referral_payload(await programme.referral_code(dave.id)),
+        )
+
+    alice_id, carol_id, bob_link, dave_link = await seed(pg, build)
+
+    async def open_link(session: AsyncSession, index: int) -> ReferralOutcome:
+        programme = ReferralProgramService(session)
+        if index % 2 == 0:
+            return (await programme.attribute_from_start(carol_id, bob_link)).outcome
+        return (await programme.attribute_from_start(alice_id, dave_link)).outcome
+
+    results = await race(pg, open_link)
+
+    assert errors(results) == []
+    assert await scalar(pg, select(func.count()).select_from(Referral)) == 3, (
+        "exactly one of the two closing referrals is recorded"
+    )
+    assert ReferralOutcome.LOOP in results

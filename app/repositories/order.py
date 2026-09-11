@@ -53,6 +53,11 @@ class OrderRepository(BaseRepository[Order]):
         )
         return result.first()
 
+    async def has_any_for_user(self, user_id: int) -> bool:
+        """Whether the customer has ever placed an order, in any status."""
+        found = await self.session.scalar(select(Order.id).where(Order.user_id == user_id).limit(1))
+        return found is not None
+
     async def list_by_status(
         self,
         status: OrderStatus | str,

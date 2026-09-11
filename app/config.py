@@ -131,6 +131,21 @@ class Settings(BaseSettings):
         le=1,
         description="Roulette spins the referrer gets for a qualified referral: 1, or 0 for none.",
     )
+    referral_reward_stamps: int = Field(
+        default=2,
+        ge=0,
+        le=100,
+        description="Stamps the referrer gets when a referral qualifies; 0 for none.",
+    )
+    referred_user_start_stamps: int = Field(
+        default=2,
+        ge=0,
+        le=100,
+        description=(
+            "Stamps the referred customer gets when their referral qualifies — at their "
+            "first completed, paid order; 0 for none."
+        ),
+    )
     # Roulette prize weights: a prize's chance is its weight over the sum of all
     # of them (the defaults add up to 100, so they read as percentages). A
     # weight of 0 takes the prize out of the roulette.

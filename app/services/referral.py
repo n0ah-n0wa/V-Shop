@@ -1,10 +1,11 @@
-"""Referral persistence — codes, attribution, qualification.
+"""Referral persistence — codes, deep links, attribution, qualification.
 
-Rewarding the two sides is not done here: when a referral qualifies, the caller
-books the bonuses through :meth:`LoyaltyService.credit_referral` and
-:meth:`RouletteService.grant_referral_spin`, both idempotent per referral.
-Deciding that the referred customer is genuinely *new* is also the caller's
-job, at ``/start`` time — this module enforces what the database can know.
+Rewarding the two sides is not done here: when a referral qualifies, the
+programme (:mod:`app.services.referral_program`) books the bonuses through
+:meth:`LoyaltyService.credit_referral` and the spin through the entitlement
+service, each idempotent per referral. Deciding that the referred customer is
+genuinely *new* is also the programme's job, at ``/start`` time — this module
+enforces what the database can know.
 """
 
 from __future__ import annotations
@@ -29,6 +30,15 @@ from app.services.loyalty import LoyaltyError, LoyaltyService
 REFERRAL_CODE_BYTES = 9
 REFERRAL_CODE_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,32}")
 _CODE_ATTEMPTS = 5
+# A referral link opens the bot with ``/start ref_<code>``. Telegram allows a
+# start parameter of 1-64 characters from [A-Za-z0-9_-].
+REFERRAL_PAYLOAD_PREFIX = "ref_"
+START_PAYLOAD_MAX_LENGTH = 64
+# A bot's username: 5-32 characters, letters, digits and underscores.
+BOT_USERNAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]{4,31}")
+# How far up a referral chain attribution looks for a loop. A longer chain is
+# refused rather than trusted; none exists in practice.
+MAX_CHAIN = 100
 
 
 class SelfReferralError(LoyaltyError):
@@ -51,6 +61,37 @@ def generate_referral_code() -> str:
 
 def is_valid_referral_code(code: str | None) -> bool:
     return code is not None and REFERRAL_CODE_PATTERN.fullmatch(code) is not None
+
+
+def referral_payload(code: str) -> str:
+    """The ``/start`` payload that carries ``code``."""
+    if not is_valid_referral_code(code):
+        raise ValueError("Not a referral code")
+    return f"{REFERRAL_PAYLOAD_PREFIX}{code}"
+
+
+def parse_referral_payload(payload: str | None) -> str | None:
+    """
+    The referral code in a ``/start`` payload, or ``None`` for anything else.
+
+    Never raises: a missing, overlong, foreign or malformed payload — anything
+    a client can type after /start — simply carries no referral, and none of it
+    reaches SQL.
+    """
+    if not payload or len(payload) > START_PAYLOAD_MAX_LENGTH:
+        return None
+    if not payload.startswith(REFERRAL_PAYLOAD_PREFIX):
+        return None
+    code = payload.removeprefix(REFERRAL_PAYLOAD_PREFIX)
+    return code if is_valid_referral_code(code) else None
+
+
+def referral_link(bot_username: str, code: str) -> str:
+    """Telegram's deep link into the bot: ``https://t.me/<bot>?start=ref_<code>``."""
+    username = bot_username.removeprefix("@")
+    if not BOT_USERNAME_PATTERN.fullmatch(username):
+        raise ValueError(f"Not a bot username: {bot_username!r}")
+    return f"https://t.me/{username}?start={referral_payload(code)}"
 
 
 class ReferralService:
@@ -97,11 +138,19 @@ class ReferralService:
         if existing is not None:
             return ReferralAttribution(existing, created=False)
 
-        reverse = await self.referrals.get_by_referred_user_id(referrer_user_id)
-        if reverse is not None and reverse.referrer_user_id == referred_user_id:
+        # One attribution at a time, to the end of the transaction. The loop
+        # check below must see every referral — including one a concurrent
+        # /start committed a moment ago, or two brand-new customers opening each
+        # other's links at once would each become the other's referrer.
+        await self.referrals.lock_attributions()
+        existing = await self.referrals.get_by_referred_user_id(referred_user_id)
+        if existing is not None:
+            return ReferralAttribution(existing, created=False)
+
+        if await self._leads_back_to(referrer_user_id, referred_user_id):
             raise ReferralLoopError(
-                f"User {referrer_user_id} was referred by {referred_user_id}; "
-                "the reverse referral would form a loop"
+                f"User {referred_user_id} is up user {referrer_user_id}'s referral chain; "
+                "the referral would form a loop"
             )
 
         try:
@@ -120,6 +169,25 @@ class ReferralService:
 
     async def get_for_referred_user(self, user_id: int) -> Referral | None:
         return await self.referrals.get_by_referred_user_id(user_id)
+
+    async def _leads_back_to(self, referrer_user_id: int, target: int) -> bool:
+        """
+        Whether ``target`` is up ``referrer_user_id``'s referral chain.
+
+        Refusing it keeps the referral graph free of cycles, of any length —
+        which also keeps the account locks a payout takes free of cycles.
+        """
+        seen = {referrer_user_id}
+        current = referrer_user_id
+        for _ in range(MAX_CHAIN):
+            referral = await self.referrals.get_by_referred_user_id(current)
+            if referral is None:
+                return False
+            current = referral.referrer_user_id
+            if current == target or current in seen:
+                return True
+            seen.add(current)
+        return True
 
     async def qualify(self, referral_id: int, *, order_id: int) -> bool:
         """

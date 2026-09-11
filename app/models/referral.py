@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.database.base import Base, TimestampMixin
 from app.models.enums import ReferralStatus
@@ -66,6 +66,22 @@ class Referral(Base, TimestampMixin):
         DateTime(timezone=True),
         nullable=True,
     )
+
+    # What a referral records never changes once set: who invited whom, and the
+    # order that qualified it. The schema enforces one referral per customer and
+    # one qualifying order; changes made in raw SQL show in loyalty_health.
+    @validates("referrer_user_id", "referred_user_id", "qualifying_order_id")
+    def _set_once(self, key: str, value: int | None) -> int | None:
+        current = self.__dict__.get(key)
+        if current is not None and value != current:
+            raise ValueError(f"Referral.{key} never changes once set")
+        return value
+
+    @validates("status")
+    def _never_back(self, key: str, value: ReferralStatus) -> ReferralStatus:
+        if self.__dict__.get(key) == ReferralStatus.QUALIFIED and value != ReferralStatus.QUALIFIED:
+            raise ValueError("A qualified referral stays qualified")
+        return value
 
     def __repr__(self) -> str:
         return (

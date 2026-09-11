@@ -11,12 +11,14 @@ import pytest
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import OrderStatus
+from app.models.enums import OrderStatus, ReferralStatus
 from app.models.loyalty import LoyaltyAccount, LoyaltyTransaction
+from app.models.referral import Referral
 from app.models.reward import UserReward
 from app.models.roulette import RouletteSpin, RouletteSpinGrant
 from app.services.admin import AdminService
 from app.services.loyalty import LoyaltyService
+from app.services.referral import ReferralService
 from app.services.roulette import PRIZE_CATALOGUE, RouletteService
 from app.services.stamp_card import StampCardService
 from app.verify_deployment import loyalty_health
@@ -60,6 +62,7 @@ async def test_a_consistent_state_has_no_integrity_problem(session: AsyncSession
         "stamp_card_rewards_without_debit": 0,
         "spin_grants_out_of_step_with_spins": 0,
         "spins_without_their_prize": 0,
+        "referral_bonuses_before_qualification": 0,
     }
     assert health["coverage"] == {"users_without_account": 0, "users_without_welcome_spin": 0}
 
@@ -156,3 +159,29 @@ async def test_a_spin_whose_prize_no_longer_matches_is_reported(
     await session.execute(drift().execution_options(synchronize_session=False))
 
     assert (await loyalty_health(session))["integrity"]["spins_without_their_prize"] >= 1
+
+
+async def test_a_referral_bonus_paid_before_qualifying_is_reported(session: AsyncSession) -> None:
+    referrer = await make_user(session, telegram_id=8803)
+    referred = await make_user(session, telegram_id=8804)
+    referral = (
+        await ReferralService(session).attribute(
+            referrer_user_id=referrer.id, referred_user_id=referred.id
+        )
+    ).referral
+    order = await make_order(session, referred)
+    order.total_price = Decimal("20.00")
+    admin = AdminService(session)
+    for status in TO_COMPLETED:
+        order = await admin.set_order_status(order, status)  # pays both sides and a spin
+    check = "referral_bonuses_before_qualification"
+    assert (await loyalty_health(session))["integrity"][check] == 0
+
+    await session.execute(
+        update(Referral)
+        .where(Referral.id == referral.id)
+        .values(status=ReferralStatus.PENDING, qualifying_order_id=None, qualified_at=None)
+        .execution_options(synchronize_session=False)
+    )
+
+    assert (await loyalty_health(session))["integrity"][check] == 3, "two bonuses and a spin"

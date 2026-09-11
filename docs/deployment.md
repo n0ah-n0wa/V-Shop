@@ -163,7 +163,8 @@ their statuses, historical totals, and the rendered statistics dashboard. Its
 - `integrity` — cached balances or purchase counts the stamp ledger does not
   explain, ledger rows whose running balance is wrong, stamp-card rewards
   without their debit, spin grants out of step with their spins, spins whose
-  prize is missing or does not match what was won. The bot never
+  prize is missing or does not match what was won, referral bonuses booked
+  before their referral qualified. The bot never
   produces any of these, so every value must be `0`; anything else means rows
   were changed outside it, and the ledger is the record to trust.
 - `coverage` — users without a loyalty account or welcome spin. The bot grants

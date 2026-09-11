@@ -129,6 +129,23 @@ startup. The prizes themselves are defined in code (`PRIZE_CATALOGUE` in
 prize. A won discount is a reward redeemed on one later order: its percentage of
 the order total, rounded half up to the cent.
 
+## Referrals
+
+All optional; these are the defaults.
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `REFERRAL_REWARD_STAMPS` | int | `2` | Stamps the referrer gets when a referral qualifies; `0` for none |
+| `REFERRED_USER_START_STAMPS` | int | `2` | Stamps the referred customer gets at the same moment; `0` for none |
+
+A referral is attributed when a brand-new customer — one who has never placed an
+order — opens the bot through a friend's link (`https://t.me/<bot>?start=ref_<code>`).
+It qualifies at that customer's first **Completed**, paid, post-launch order, and
+both sides are paid then, once; the referrer also gets the `REFERRAL_SPINS`
+roulette spin. Nothing is paid at sign-up, so a second Telegram account earns
+nothing on its own. A value below `0` or above `100` stops the bot at startup.
+Referral codes are random and do not expire.
+
 ## Docker Compose extras
 
 Compose can override DB credentials via:

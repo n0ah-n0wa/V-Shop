@@ -27,7 +27,7 @@ import sys
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Select, and_, case, exists, func, inspect, or_, select, text
+from sqlalchemy import ColumnElement, Select, and_, case, exists, func, inspect, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import get_settings
@@ -36,6 +36,7 @@ from app.models.category import Category, Subcategory
 from app.models.enums import (
     LoyaltyTransactionType,
     OrderStatus,
+    ReferralStatus,
     RewardSource,
     RoulettePrizeType,
     SpinGrantReason,
@@ -111,6 +112,15 @@ async def loyalty_health(session: AsyncSession) -> dict[str, dict[str, int]]:
         UserReward.value == RouletteSpin.prize_value,
     )
 
+    def paid_before_qualifying(referral_id: Any) -> ColumnElement[bool]:
+        """A referral bonus whose referral has not qualified: nothing should be paid yet."""
+        return and_(
+            referral_id.is_not(None),
+            ~exists().where(
+                Referral.id == referral_id, Referral.status == ReferralStatus.QUALIFIED
+            ),
+        )
+
     return {
         "integrity": {
             # Ledger rows of a customer with no account count too: nothing
@@ -161,6 +171,16 @@ async def loyalty_health(session: AsyncSession) -> dict[str, dict[str, int]]:
                         and_(~stamp_prize, ~reward_issued),
                     )
                 )
+            ),
+            "referral_bonuses_before_qualification": await count(
+                select(func.count())
+                .select_from(LoyaltyTransaction)
+                .where(paid_before_qualifying(LoyaltyTransaction.referral_id))
+            )
+            + await count(
+                select(func.count())
+                .select_from(RouletteSpinGrant)
+                .where(paid_before_qualifying(RouletteSpinGrant.referral_id))
             ),
         },
         "coverage": {
