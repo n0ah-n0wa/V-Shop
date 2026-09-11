@@ -37,6 +37,7 @@ from app.models.enums import (
     LoyaltyTransactionType,
     OrderStatus,
     RewardSource,
+    RoulettePrizeType,
     SpinGrantReason,
 )
 from app.models.loyalty import LoyaltyAccount, LoyaltyTransaction
@@ -67,8 +68,8 @@ async def loyalty_health(session: AsyncSession) -> dict[str, dict[str, int]]:
     ``integrity`` counts states the services never produce, so every value must
     be 0 — anything else means rows were changed behind their back, and the
     ledger is the record to trust. ``coverage`` counts customers without their
-    loyalty rows: 0 right after the loyalty migration, then growing with new
-    sign-ups until onboarding grants them (accounts are created on first use).
+    loyalty rows: welcome spins are granted at ``/start`` and topped up on every
+    bot start, so that count is 0 after one; accounts are created on first use.
     """
 
     async def count(statement: Select[Any]) -> int:
@@ -97,6 +98,18 @@ async def loyalty_health(session: AsyncSession) -> dict[str, dict[str, int]]:
         .label("running"),
     ).subquery()
     spun = exists().where(RouletteSpin.grant_id == RouletteSpinGrant.id)
+    # What each spin won must exist exactly as won: stamps booked at the prize's
+    # value, or a reward of the prize's kind and value pointing back at it.
+    stamp_prize = RouletteSpin.prize_type == RoulettePrizeType.STAMPS
+    stamps_booked = exists().where(
+        LoyaltyTransaction.spin_id == RouletteSpin.id,
+        LoyaltyTransaction.amount == RouletteSpin.prize_value,
+    )
+    reward_issued = exists().where(
+        UserReward.spin_id == RouletteSpin.id,
+        UserReward.kind == RouletteSpin.prize_type,
+        UserReward.value == RouletteSpin.prize_value,
+    )
 
     return {
         "integrity": {
@@ -136,6 +149,16 @@ async def loyalty_health(session: AsyncSession) -> dict[str, dict[str, int]]:
                     or_(
                         and_(RouletteSpinGrant.consumed_at.is_not(None), ~spun),
                         and_(RouletteSpinGrant.consumed_at.is_(None), spun),
+                    )
+                )
+            ),
+            "spins_without_their_prize": await count(
+                select(func.count())
+                .select_from(RouletteSpin)
+                .where(
+                    or_(
+                        and_(stamp_prize, ~stamps_booked),
+                        and_(~stamp_prize, ~reward_issued),
                     )
                 )
             ),

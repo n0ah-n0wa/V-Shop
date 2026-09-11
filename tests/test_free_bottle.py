@@ -483,6 +483,7 @@ async def test_a_roulette_free_bottle_is_redeemed_by_the_same_mechanism(
 
 
 async def test_a_discount_reward_cannot_pay_for_a_bottle(session: AsyncSession) -> None:
+    """A discount is a percentage off the order — never a free unit."""
     user = await make_user(session, telegram_id=8119)
     roulette = RouletteService(session)
     await roulette.grant_initial_spin(user.id)
@@ -491,10 +492,19 @@ async def test_a_discount_reward_cannot_pay_for_a_bottle(session: AsyncSession) 
     (bottle,) = await products(session, "20.00")
 
     with pytest.raises(RewardNotApplicableError):
-        await checkout(session, user, [(bottle, 1)], reward_id=outcome.reward.id)
+        await RewardService(session).plan_free_bottle(
+            outcome.reward.id, user_id=user.id, lines=[(bottle.id, 1, Decimal("20.00"))]
+        )
 
-    assert await count(session, Order) == 0
-    assert await reward_status(session, outcome.reward.id) == RewardStatus.AVAILABLE
+    order = await checkout(session, user, [(bottle, 1)], reward_id=outcome.reward.id)
+
+    assert order.total_price == Decimal("18.00"), "10% off the order"
+    assert [item.price for item in order.items] == [Decimal("20.00")], "no unit made free"
+    assert (
+        outcome.reward.status,
+        outcome.reward.discount_amount,
+        outcome.reward.redeemed_product_id,
+    ) == (RewardStatus.USED, Decimal("2.00"), None)
 
 
 async def test_stamps_after_a_redemption_come_from_what_was_charged(

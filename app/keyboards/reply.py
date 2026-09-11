@@ -13,6 +13,7 @@ def main_menu_keyboard(i18n: LocalizationService) -> ReplyKeyboardMarkup:
                 KeyboardButton(text=i18n.t("menu.cart")),
             ],
             [KeyboardButton(text=i18n.t("menu.stamp_card"))],
+            [KeyboardButton(text=i18n.t("menu.roulette"))],
             [KeyboardButton(text=i18n.t("menu.info"))],
         ],
         resize_keyboard=True,

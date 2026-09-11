@@ -21,6 +21,7 @@ from app.services.admin.exceptions import (
 )
 from app.services.admin.orders import AdminOrderService
 from app.services.admin.users import AdminUserService
+from app.services.spin_entitlement import SpinPolicy
 from app.services.stamp_card import StampCardPolicy
 
 __all__ = [
@@ -44,12 +45,13 @@ class AdminService:
     """
 
     def __init__(self, session: AsyncSession, *, settings: Settings | None = None) -> None:
-        """``settings`` carries the configured stamp-card rules to order completion."""
+        """``settings`` carries the configured stamp and spin rules to order completion."""
         self.session = session
         self.catalog = AdminCatalogService(session)
         self.order_admin = AdminOrderService(
             session,
             stamp_policy=StampCardPolicy.from_settings(settings) if settings is not None else None,
+            spin_policy=SpinPolicy.from_settings(settings) if settings is not None else None,
         )
         self.user_admin = AdminUserService(session)
         # Preserve legacy repository attributes used by some call sites.

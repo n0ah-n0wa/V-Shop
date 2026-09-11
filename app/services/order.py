@@ -15,7 +15,7 @@ from app.repositories.cart_item import CartItemRepository
 from app.repositories.order import OrderRepository
 from app.repositories.order_item import OrderItemRepository
 from app.repositories.product import ProductRepository
-from app.services.reward import FreeBottlePlan, RewardService
+from app.services.reward import RewardPlan, RewardService
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +74,10 @@ class OrderService:
         4. Flush + commit to PostgreSQL
         5. Return the saved order (with items loaded)
 
-        ``reward_id`` redeems one of the customer's free-bottle rewards on this
-        order: one eligible unit is charged €0 and the reward is bound to the
-        order in the same transaction. A reward that is unavailable, not the
+        ``reward_id`` redeems one of the customer's rewards on this order — a
+        free bottle charges one eligible unit €0, a percentage discount lowers
+        the total — and binds it to the order in the same transaction. A reward
+        that is unavailable, not the
         customer's, or not applicable to the cart is refused before anything is
         written — see :mod:`app.services.reward`.
         """
@@ -116,9 +117,9 @@ class OrderService:
             raise EmptyCartError("Cart is empty")
 
         rewards = RewardService(self.session)
-        plan: FreeBottlePlan | None = None
+        plan: RewardPlan | None = None
         if reward_id is not None:
-            plan = await rewards.plan_free_bottle(reward_id, user_id=user.id, lines=line_items)
+            plan = await rewards.plan(reward_id, user_id=user.id, lines=line_items)
             line_items = plan.apply(line_items)
             total -= plan.discount
 

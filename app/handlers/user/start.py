@@ -10,11 +10,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings
 from app.keyboards.inline import city_keyboard, language_keyboard
 from app.keyboards.reply import main_menu_keyboard
 from app.models.enums import CityChoice, LanguageCode
 from app.models.user import User
 from app.services.localization import LocalizationService
+from app.services.spin_entitlement import SpinEntitlementService, SpinPolicy
 from app.services.user import UserService
 from app.states.onboarding import OnboardingStates
 from app.utils.telegram_ui import as_message
@@ -79,6 +81,7 @@ async def cmd_start(
     message: Message,
     state: FSMContext,
     session: AsyncSession,
+    settings: Settings,
 ) -> None:
     """
     Entry point.
@@ -91,6 +94,11 @@ async def cmd_start(
 
     service = UserService(session)
     user = await service.ensure_user(message.from_user)
+    # The customer's one welcome spin: granted on the first /start, and every
+    # later /start finds it already there — it never grants a second.
+    await SpinEntitlementService(session, SpinPolicy.from_settings(settings)).grant_welcome_spin(
+        user.id
+    )
     i18n = LocalizationService.from_user(user)
 
     logger.info(

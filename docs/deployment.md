@@ -162,12 +162,14 @@ their statuses, historical totals, and the rendered statistics dashboard. Its
 
 - `integrity` — cached balances or purchase counts the stamp ledger does not
   explain, ledger rows whose running balance is wrong, stamp-card rewards
-  without their debit, spin grants out of step with their spins. The bot never
+  without their debit, spin grants out of step with their spins, spins whose
+  prize is missing or does not match what was won. The bot never
   produces any of these, so every value must be `0`; anything else means rows
   were changed outside it, and the ledger is the record to trust.
-- `coverage` — users without a loyalty account or welcome spin. Both are `0`
-  right after the loyalty migration (`3b9d6f2a8c14`), then grow with new
-  sign-ups until onboarding grants them; accounts are created on first use.
+- `coverage` — users without a loyalty account or welcome spin. The bot grants
+  the welcome spin at `/start` and tops it up for every customer still without
+  one each time it starts, so after a start that count is `0`. Accounts are
+  created on first use, so users without one are normal.
 
 ## Safe operations
 

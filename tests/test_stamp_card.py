@@ -482,6 +482,7 @@ async def test_claim_rules_follow_the_configuration(session: AsyncSession) -> No
 # Calls that book stamps or bind a reward, each with the one module allowed to make it.
 SINGLE_TRIGGER = {
     ".award_for_order(": "app/services/admin/orders.py",  # order completion
+    ".grant_for_completed_order(": "app/services/admin/orders.py",  # its milestone spin
     ".record_purchase(": "app/services/stamp_card.py",
     ".redeem(": "app/services/order.py",  # checkout
     ".use_reward(": "app/services/reward.py",
@@ -494,6 +495,7 @@ SERVICE_ONLY = (
     ".adjust(",
     ".grant_purchase_milestone_spin(",
     ".grant_referral_spin(",
+    ".grant_for_referral(",
 )
 
 

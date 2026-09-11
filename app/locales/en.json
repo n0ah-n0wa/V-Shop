@@ -34,7 +34,8 @@
     "catalog": "🛍 Catalog",
     "cart": "🛒 Cart",
     "info": "ℹ Information",
-    "stamp_card": "🪪 My Stamp Card"
+    "stamp_card": "🪪 My Stamp Card",
+    "roulette": "🎰 Lucky Roulette"
   },
   "catalog": {
     "title": "🛍 Catalog",
@@ -165,6 +166,44 @@
     "already_claimed": "✅ You have already claimed this free bottle.",
     "changed": "🔄 Your stamp card has changed — here is the latest version.",
     "not_enough": "🎯 You don't have enough stamps for a free bottle yet."
+  },
+  "roulette": {
+    "prize": {
+      "stamp_1": "+1 stamp",
+      "stamp_2": "+2 stamps",
+      "discount_5": "5% off one order",
+      "discount_10": "10% off one order",
+      "free_bottle": "A free bottle"
+    },
+    "title": "<b>🎰 Lucky Roulette</b>",
+    "spins": "🎟 Your spins: <b>{count}</b>",
+    "intro": "Tap “{button}” below and try your luck!",
+    "no_spins": "You have no spins right now.",
+    "next_spin": "🛍 Completed orders until your next spin: <b>{orders}</b>",
+    "prizes": "✨ <b>Every spin wins one of these:</b>",
+    "group_stamps": "🟢 Stamps: {values}",
+    "group_discount": "🏷 Discount on one order: {values}",
+    "group_free_bottle": "🎁 A free bottle up to {amount}",
+    "value_stamps": "+{value}",
+    "value_percent": "{value}%",
+    "spin": "🎰 Spin!",
+    "spin_again": "🎰 Spin again",
+    "back": "⬅️ Back to roulette",
+    "spinning": "🎰 <b>Spinning…</b>\n\n{reels}",
+    "drumroll": "🥁 <b>And your prize is…</b>\n\n{reels}",
+    "good_luck": "🍀 Good luck!",
+    "won": "🎉 <b>You won!</b>",
+    "jackpot": "🏆 <b>Jackpot!</b>",
+    "prize_line": "{icon} <b>{prize}</b>",
+    "reward_stamps": "🪪 Added to your stamp card:",
+    "card_full": "🎁 Your card is full — claim your free bottle on the stamp card!",
+    "reward_saved": "✅ Reward saved in your account.",
+    "reward_free_bottle": "✅ Reward saved in your account: any bottle up to {amount}, free.",
+    "remaining": "🎟 Spins left: <b>{count}</b>",
+    "already_played": "✅ Already spun — here's your prize.",
+    "no_spins_left": "🎟 No spins left — complete orders to earn more.",
+    "stale": "🔄 That button was out of date — here's your roulette now.",
+    "failed": "⚠️ Something went wrong — your spin is safe. Please tap Spin again."
   },
   "error": {
     "generic": "⚠️ An unexpected error occurred. Please try again later.",

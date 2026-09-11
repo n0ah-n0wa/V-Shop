@@ -75,6 +75,19 @@ class LoyaltyTransactionRepository(BaseRepository[LoyaltyTransaction]):
         )
         return found is not None
 
+    async def purchase_number(self, user_id: int, transaction_id: int) -> int:
+        """Which of the customer's purchases a ledger row is: 1 for the first, 5 for the fifth."""
+        value = await self.session.scalar(
+            select(func.count())
+            .select_from(LoyaltyTransaction)
+            .where(
+                LoyaltyTransaction.user_id == user_id,
+                LoyaltyTransaction.kind == LoyaltyTransactionType.PURCHASE,
+                LoyaltyTransaction.id <= transaction_id,
+            )
+        )
+        return int(value or 0)
+
     async def latest_id_for_user(self, user_id: int) -> int:
         """The newest row's id, 0 if none. Served by ix_loyalty_transactions_user_id_id."""
         value = await self.session.scalar(

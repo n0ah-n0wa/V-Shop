@@ -92,6 +92,43 @@ The customer's 🪪 My Stamp Card shows these values. Its promo — "get your 11
 bottle free" — is worded for `LOYALTY_STAMPS_REQUIRED` between 10 and 19 in all
 four languages; outside that range, review the `stamp_card.promo` strings.
 
+## Roulette spins
+
+All optional; these are the defaults.
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `ROULETTE_INITIAL_FREE_SPIN` | bool | `true` | Every customer gets one welcome spin — once, ever |
+| `ROULETTE_SPIN_EVERY_N_PURCHASES` | int | `5` | Every Nth qualifying completed purchase grants a spin (the 5th, 10th, …); `0` turns purchase spins off |
+| `REFERRAL_SPINS` | int | `1` | Spins the referrer gets for a qualified referral: `1`, or `0` for none |
+
+A qualifying purchase is one the stamp card books: a **Completed** order placed
+after the loyalty launch and charged more than €0. The milestone is decided when
+the order completes, with the interval in force then — changing it never grants
+spins for past purchases. Welcome spins are granted at `/start` and, for every
+customer still without one, each time the bot starts; nobody ever gets a second.
+A negative value, or `REFERRAL_SPINS` above `1`, stops the bot at startup.
+
+## Roulette prizes
+
+All optional; these are the defaults. A prize's chance is its weight divided by
+the sum of all weights — the defaults add up to 100, so they read as percentages.
+
+| Variable | Type | Default | Prize |
+|---|---|---|---|
+| `ROULETTE_PRIZE_STAMP_1_WEIGHT` | int | `40` | +1 stamp |
+| `ROULETTE_PRIZE_STAMP_2_WEIGHT` | int | `25` | +2 stamps |
+| `ROULETTE_PRIZE_DISCOUNT_5_WEIGHT` | int | `20` | 5% off one order |
+| `ROULETTE_PRIZE_DISCOUNT_10_WEIGHT` | int | `10` | 10% off one order |
+| `ROULETTE_PRIZE_FREE_BOTTLE_WEIGHT` | int | `5` | One free bottle up to `LOYALTY_FREE_BOTTLE_MAX_PRICE` |
+
+`0` takes a prize out of the roulette. At least one weight must be above `0`,
+and none may be negative or above 1,000,000 — otherwise the bot stops at
+startup. The prizes themselves are defined in code (`PRIZE_CATALOGUE` in
+`app/services/roulette.py`), never in a handler, and a spin can record no other
+prize. A won discount is a reward redeemed on one later order: its percentage of
+the order total, rounded half up to the cent.
+
 ## Docker Compose extras
 
 Compose can override DB credentials via:

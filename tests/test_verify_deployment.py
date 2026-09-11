@@ -11,36 +11,40 @@ import pytest
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import OrderStatus, RoulettePrizeType
+from app.models.enums import OrderStatus
 from app.models.loyalty import LoyaltyAccount, LoyaltyTransaction
-from app.models.roulette import RouletteSpinGrant
+from app.models.reward import UserReward
+from app.models.roulette import RouletteSpin, RouletteSpinGrant
 from app.services.admin import AdminService
 from app.services.loyalty import LoyaltyService
-from app.services.roulette import RoulettePrize, RouletteService
+from app.services.roulette import PRIZE_CATALOGUE, RouletteService
 from app.services.stamp_card import StampCardService
 from app.verify_deployment import loyalty_health
 from tests.factories import make_order, make_user
 
 TO_COMPLETED = (OrderStatus.ACCEPTED, OrderStatus.SHIPPED, OrderStatus.COMPLETED)
+PRIZE = {prize.code: prize for prize in PRIZE_CATALOGUE}
 
 
 async def active_customer(session: AsyncSession) -> int:
     """A customer who has done a bit of everything, all through the services."""
     user = await make_user(session, telegram_id=8801)
     admin = AdminService(session)
-    last_order_id = 0
+    order_ids = []
     for _ in range(3):  # 3 x €40 = 6 stamps
         order = await make_order(session, user)
         order.total_price = Decimal("40.00")
         for status in TO_COMPLETED:
             order = await admin.set_order_status(order, status)
-        last_order_id = order.id
+        order_ids.append(order.id)
     await LoyaltyService(session).adjust(user.id, amount=4, note="goodwill")
     await StampCardService(session).claim_free_bottle(user.id)
     roulette = RouletteService(session)
     await roulette.grant_initial_spin(user.id)
-    await roulette.spin(user.id, RoulettePrize("stamp_1", RoulettePrizeType.STAMPS, 1))
-    await roulette.grant_purchase_milestone_spin(user.id, order_id=last_order_id)  # unspun
+    await roulette.spin(user.id, PRIZE["stamp_1"])  # won stamps
+    await roulette.grant_purchase_milestone_spin(user.id, order_id=order_ids[0])
+    await roulette.spin(user.id, PRIZE["discount_10"])  # won a reward
+    await roulette.grant_purchase_milestone_spin(user.id, order_id=order_ids[-1])  # unspun
     return user.id
 
 
@@ -55,6 +59,7 @@ async def test_a_consistent_state_has_no_integrity_problem(session: AsyncSession
         "ledger_rows_with_wrong_running_balance": 0,
         "stamp_card_rewards_without_debit": 0,
         "spin_grants_out_of_step_with_spins": 0,
+        "spins_without_their_prize": 0,
     }
     assert health["coverage"] == {"users_without_account": 0, "users_without_welcome_spin": 0}
 
@@ -123,3 +128,31 @@ async def test_drift_behind_the_services_is_reported(
     await session.execute(drift(user_id).execution_options(synchronize_session=False))
 
     assert (await loyalty_health(session))["integrity"][check] >= 1
+
+
+# What a spin won, changed after the fact — each no longer matches the spin.
+PRIZE_DRIFT: dict[str, Callable[[], Any]] = {
+    "stamps-rebooked": lambda: (
+        update(LoyaltyTransaction)
+        .where(LoyaltyTransaction.spin_id.is_not(None))
+        .values(amount=LoyaltyTransaction.amount + 1)
+    ),
+    "reward-inflated": lambda: (
+        update(UserReward).where(UserReward.spin_id.is_not(None)).values(value=50)
+    ),
+    "reward-removed": lambda: delete(UserReward).where(UserReward.spin_id.is_not(None)),
+    "prize-rewritten": lambda: update(RouletteSpin).values(
+        prize_value=RouletteSpin.prize_value + 1
+    ),
+}
+
+
+@pytest.mark.parametrize("drift", list(PRIZE_DRIFT.values()), ids=list(PRIZE_DRIFT))
+async def test_a_spin_whose_prize_no_longer_matches_is_reported(
+    session: AsyncSession, drift: Callable[[], Any]
+) -> None:
+    await active_customer(session)
+
+    await session.execute(drift().execution_options(synchronize_session=False))
+
+    assert (await loyalty_health(session))["integrity"]["spins_without_their_prize"] >= 1

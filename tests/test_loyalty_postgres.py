@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
+from aiogram.types import User as TgUser
 from sqlalchemy import func, inspect, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
@@ -32,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import app.models  # noqa: F401  (populates the metadata)
 from app.database.base import Base
+from app.models.cart import Cart
 from app.models.enums import (
     LoyaltyTransactionType,
     OrderStatus,
@@ -39,6 +41,7 @@ from app.models.enums import (
     RewardSource,
     RewardType,
     RoulettePrizeType,
+    SpinGrantReason,
 )
 from app.models.loyalty import LoyaltyTransaction
 from app.models.order import Order
@@ -57,14 +60,18 @@ from app.services.loyalty import (
 from app.services.order import EmptyCartError, OrderService
 from app.services.referral import ReferralAttribution, ReferralService
 from app.services.reward import RewardService, RewardUnavailableError
-from app.services.roulette import RoulettePrize, RouletteService, SpinGrantResult
+from app.services.roulette import RoulettePrize, RouletteService, SpinGrantResult, SpinOutcome
+from app.services.roulette_engine import RouletteEngine, RoulettePolicy
+from app.services.spin_entitlement import SpinEntitlementService
 from app.services.stamp_card import StampCardService
+from app.services.user import UserService
 from tests.factories import add_order_item, make_category, make_order, make_product, make_user
 
 URL = os.environ.get("VSHOP_TEST_POSTGRES_URL", "")
 RACERS = 8
 CEILING = Decimal("20.00")
 STAMP_1 = RoulettePrize(code="stamp_1", kind=RoulettePrizeType.STAMPS, value=1)
+POLICY = RoulettePolicy.defaults()
 
 Factory = async_sessionmaker[AsyncSession]
 
@@ -533,3 +540,209 @@ async def test_a_racing_cancel_cannot_undo_a_completed_award(pg: Factory) -> Non
     assert booked in (0, 1)
     async with pg() as session:
         assert await LoyaltyService(session).balance(user_id) == 2 * booked
+
+
+# --------------------------------------------------------------- spin grants
+
+
+async def _customer_with_purchases(
+    pg: Factory, telegram_id: int, *, purchases: int, shipped: int
+) -> tuple[int, list[int]]:
+    """A customer with ``purchases`` completed purchases and ``shipped`` orders to complete."""
+
+    async def build(session: AsyncSession) -> tuple[int, list[int]]:
+        user = await make_user(session, telegram_id=telegram_id)
+        admin = AdminService(session)
+        for _ in range(purchases):
+            order = await make_order(session, user)
+            order.total_price = Decimal("20.00")
+            for status in (OrderStatus.ACCEPTED, OrderStatus.SHIPPED, OrderStatus.COMPLETED):
+                order = await admin.set_order_status(order, status)
+        pending = []
+        for _ in range(shipped):
+            order = await make_order(session, user, status=OrderStatus.SHIPPED)
+            order.total_price = Decimal("20.00")
+            pending.append(order)
+        await session.flush()
+        return user.id, [order.id for order in pending]
+
+    result: tuple[int, list[int]] = await seed(pg, build)
+    return result
+
+
+async def _milestone_orders(pg: Factory, user_id: int) -> list[int | None]:
+    async with pg() as session:
+        rows = await session.scalars(
+            select(RouletteSpinGrant.order_id).where(
+                RouletteSpinGrant.user_id == user_id,
+                RouletteSpinGrant.reason == SpinGrantReason.PURCHASE_MILESTONE,
+            )
+        )
+        return list(rows.all())
+
+
+async def test_racing_completions_of_a_fifth_order_grant_one_spin(pg: Factory) -> None:
+    user_id, (fifth,) = await _customer_with_purchases(pg, 9015, purchases=4, shipped=1)
+
+    results = await race(pg, lambda s, _: _set_status(s, fifth, OrderStatus.COMPLETED))
+
+    assert errors(results) == []
+    assert await _milestone_orders(pg, user_id) == [fifth]
+
+
+async def test_a_fifth_and_sixth_order_completing_together_grant_one_spin(pg: Factory) -> None:
+    """Which order is the 5th purchase is settled under the account lock, not by luck."""
+    user_id, orders = await _customer_with_purchases(pg, 9016, purchases=4, shipped=2)
+
+    results = await race(pg, lambda s, i: _set_status(s, orders[i % 2], OrderStatus.COMPLETED))
+
+    assert errors(results) == []
+    granted = await _milestone_orders(pg, user_id)
+    assert len(granted) == 1 and granted[0] in orders
+    purchases = await scalar(
+        pg,
+        select(func.count())
+        .select_from(LoyaltyTransaction)
+        .where(
+            LoyaltyTransaction.user_id == user_id,
+            LoyaltyTransaction.kind == LoyaltyTransactionType.PURCHASE,
+        ),
+    )
+    assert purchases == 6
+
+
+async def test_the_start_up_top_up_racing_starts_grants_one_welcome_spin_each(
+    pg: Factory,
+) -> None:
+    async def build(session: AsyncSession) -> list[int]:
+        return [(await make_user(session, telegram_id=9200 + i)).id for i in range(RACERS)]
+
+    user_ids: list[int] = await seed(pg, build)
+
+    async def grant(session: AsyncSession, index: int) -> object:
+        spins = SpinEntitlementService(session)
+        if index % 2 == 0:
+            return await spins.grant_missing_welcome_spins()  # a bot start
+        return await spins.grant_welcome_spin(user_ids[index])  # a /start
+
+    results = await race(pg, grant)
+
+    assert errors(results) == []
+    async with pg() as session:
+        per_user = await session.execute(
+            select(RouletteSpinGrant.user_id, func.count())
+            .where(RouletteSpinGrant.reason == SpinGrantReason.INITIAL_PROMO)
+            .group_by(RouletteSpinGrant.user_id)
+        )
+        assert {user_id: count for user_id, count in per_user.all()} == dict.fromkeys(user_ids, 1)
+
+
+# ------------------------------------------------------------ the prize engine
+
+
+async def screen_spin(session: AsyncSession, user_id: int) -> SpinOutcome | None:
+    """What the roulette screen will do: offer the next grant, then spend exactly it."""
+    engine = RouletteEngine(session, POLICY)
+    grant_id = await engine.next_grant_id(user_id)
+    return None if grant_id is None else await engine.spin(user_id, grant_id=grant_id)
+
+
+async def test_racing_spins_on_one_grant_draw_one_prize(pg: Factory) -> None:
+    async def build(session: AsyncSession) -> int:
+        user = await make_user(session, telegram_id=9017)
+        await RouletteService(session).grant_initial_spin(user.id)
+        return user.id
+
+    user_id = await seed(pg, build)
+
+    results = await race(pg, lambda s, _: screen_spin(s, user_id))
+
+    assert errors(results) == []
+    outcomes = [r for r in results if isinstance(r, SpinOutcome)]
+    assert sum(outcome.created for outcome in outcomes) == 1
+    assert len({outcome.spin.id for outcome in outcomes}) == 1, "a late tap sees the same spin"
+    assert len(outcomes) + results.count(None) == RACERS
+    assert await scalar(pg, select(func.count()).select_from(RouletteSpin)) == 1
+
+
+async def test_a_double_tap_on_one_grant_replays_instead_of_spending_another(
+    pg: Factory,
+) -> None:
+    async def build(session: AsyncSession) -> tuple[int, int]:
+        user = await make_user(session, telegram_id=9018)
+        roulette = RouletteService(session)
+        first = (await roulette.grant_initial_spin(user.id)).grant
+        order = await make_order(session, user)
+        await roulette.grant_purchase_milestone_spin(user.id, order_id=order.id)
+        return user.id, first.id
+
+    user_id, grant_id = await seed(pg, build)
+
+    results = await race(
+        pg, lambda s, _: RouletteEngine(s, POLICY).spin(user_id, grant_id=grant_id)
+    )
+
+    assert errors(results) == []
+    outcomes = [r for r in results if isinstance(r, SpinOutcome)]
+    assert len(outcomes) == RACERS
+    assert sum(outcome.created for outcome in outcomes) == 1
+    assert len({outcome.spin.id for outcome in outcomes}) == 1, "every tap sees the same spin"
+    async with pg() as session:
+        assert await RouletteService(session).available_spins(user_id) == 1
+
+
+async def test_grants_and_spins_racing_keep_the_balance_exact(pg: Factory) -> None:
+    """Spins earned while others are spent: no grant spent twice, none lost."""
+
+    async def build(session: AsyncSession) -> tuple[int, list[int]]:
+        user = await make_user(session, telegram_id=9019)
+        await RouletteService(session).grant_initial_spin(user.id)
+        orders = [await make_order(session, user) for _ in range(RACERS // 2)]
+        return user.id, [order.id for order in orders]
+
+    user_id, order_ids = await seed(pg, build)
+
+    async def earn_or_spend(session: AsyncSession, index: int) -> object:
+        if index % 2 == 0:
+            return await RouletteService(session).grant_purchase_milestone_spin(
+                user_id, order_id=order_ids[index // 2]
+            )
+        return await screen_spin(session, user_id)
+
+    results = await race(pg, earn_or_spend)
+
+    assert errors(results) == []
+    granted = 1 + len(order_ids)
+    created = sum(isinstance(r, SpinOutcome) and r.created for r in results)
+    spins = await scalar(pg, select(func.count()).select_from(RouletteSpin))
+    consumed = await scalar(
+        pg,
+        select(func.count())
+        .select_from(RouletteSpinGrant)
+        .where(RouletteSpinGrant.consumed_at.is_not(None)),
+    )
+    assert await scalar(pg, select(func.count()).select_from(RouletteSpinGrant)) == granted
+    assert spins == consumed == created >= 1
+    assert await scalar(pg, select(func.count(func.distinct(RouletteSpin.grant_id)))) == spins
+    async with pg() as session:
+        assert await RouletteService(session).available_spins(user_id) == granted - spins
+        loyalty = LoyaltyService(session)
+        assert await loyalty.balance(user_id) == await loyalty.ledger_balance(user_id)
+
+
+async def test_a_first_start_delivered_many_times_onboards_once(pg: Factory) -> None:
+    """One brand-new customer's /start, processed repeatedly and concurrently."""
+    tg_user = TgUser(id=9020, is_bot=False, first_name="Anna", username="anna")
+
+    async def start(session: AsyncSession, _: int) -> int:
+        user = await UserService(session).ensure_user(tg_user)
+        await SpinEntitlementService(session).grant_welcome_spin(user.id)
+        return user.id
+
+    results = await race(pg, start)
+
+    assert errors(results) == []
+    assert len(set(results)) == 1, "every delivery found the same customer"
+    assert await scalar(pg, select(func.count()).select_from(User)) == 1
+    assert await scalar(pg, select(func.count()).select_from(Cart)) == 1
+    assert await scalar(pg, select(func.count()).select_from(RouletteSpinGrant)) == 1

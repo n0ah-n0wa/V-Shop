@@ -108,6 +108,11 @@ class LoyaltyService:
         account = await self.accounts.get_by_user_id(user_id)
         return account.stamp_balance if account is not None else 0
 
+    async def purchase_count(self, user_id: int) -> int:
+        """Qualifying purchases booked so far; 0 for a customer who has never had an account."""
+        account = await self.accounts.get_by_user_id(user_id)
+        return account.qualifying_purchase_count if account is not None else 0
+
     async def ledger_balance(self, user_id: int) -> int:
         """The balance as the ledger explains it. Must equal :meth:`balance`."""
         return await self.transactions.sum_for_user(user_id)

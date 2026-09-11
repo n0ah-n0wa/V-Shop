@@ -3,9 +3,9 @@
 import json
 from decimal import Decimal
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Self
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.utils.periods import DEFAULT_TIMEZONE
@@ -112,6 +112,43 @@ class Settings(BaseSettings):
         decimal_places=2,
         description="Most expensive product a free bottle may cover.",
     )
+    roulette_initial_free_spin: bool = Field(
+        default=True,
+        description="Every customer gets one welcome roulette spin — once, ever.",
+    )
+    roulette_spin_every_n_purchases: int = Field(
+        default=5,
+        ge=0,
+        description=(
+            "Every Nth qualifying completed purchase grants a roulette spin "
+            "(the 5th, 10th, … by default); 0 turns purchase spins off."
+        ),
+    )
+    referral_spins: int = Field(
+        default=1,
+        ge=0,
+        # The schema holds one spin per referral and recipient.
+        le=1,
+        description="Roulette spins the referrer gets for a qualified referral: 1, or 0 for none.",
+    )
+    # Roulette prize weights: a prize's chance is its weight over the sum of all
+    # of them (the defaults add up to 100, so they read as percentages). A
+    # weight of 0 takes the prize out of the roulette.
+    roulette_prize_stamp_1_weight: int = Field(
+        default=40, ge=0, le=1_000_000, description="Roulette weight of +1 stamp."
+    )
+    roulette_prize_stamp_2_weight: int = Field(
+        default=25, ge=0, le=1_000_000, description="Roulette weight of +2 stamps."
+    )
+    roulette_prize_discount_5_weight: int = Field(
+        default=20, ge=0, le=1_000_000, description="Roulette weight of a 5% discount."
+    )
+    roulette_prize_discount_10_weight: int = Field(
+        default=10, ge=0, le=1_000_000, description="Roulette weight of a 10% discount."
+    )
+    roulette_prize_free_bottle_weight: int = Field(
+        default=5, ge=0, le=1_000_000, description="Roulette weight of a free bottle."
+    )
     app_env: str = Field(default="development", description="Application environment name")
     log_level: str = Field(default="INFO", description="Root logging level")
     telegram_ssl_verify: bool = Field(
@@ -123,6 +160,20 @@ class Settings(BaseSettings):
     @classmethod
     def parse_admin_ids(cls, value: object) -> list[int]:
         return _parse_admin_ids(value)
+
+    @model_validator(mode="after")
+    def roulette_has_a_prize(self) -> Self:
+        """A roulette with every prize weighted 0 could never draw anything."""
+        weights = (
+            self.roulette_prize_stamp_1_weight,
+            self.roulette_prize_stamp_2_weight,
+            self.roulette_prize_discount_5_weight,
+            self.roulette_prize_discount_10_weight,
+            self.roulette_prize_free_bottle_weight,
+        )
+        if sum(weights) <= 0:
+            raise ValueError("At least one ROULETTE_PRIZE_*_WEIGHT must be above 0")
+        return self
 
     @property
     def reviews_enabled(self) -> bool:

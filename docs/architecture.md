@@ -176,11 +176,66 @@ Two steps, one reward row (`user_rewards`) whatever the source:
    `version` (its latest ledger id) makes one rendered card claimable once, so a
    double tap is refused with `StaleCardError`.
 2. **Redeem** — at checkout, `OrderService.place_order_from_cart(reward_id=…)`
-   asks `RewardService.plan_free_bottle` (locks, validates, and picks the dearest
-   product within the reward's price cap — before anything is written), creates
-   the order with that unit at €0, and `RewardService.redeem` binds the reward and
+   asks `RewardService.plan` (locks and validates the reward before anything is
+   written, and picks the dearest product within its price cap), creates the
+   order with that unit at €0, and `RewardService.redeem` binds the reward and
    records `discount_amount` and `redeemed_product_id`. One transaction: if any
-   step fails, the reward stays available and no order exists.
+   step fails, the reward stays available and no order exists. A roulette
+   percentage discount goes through the same two calls: its plan takes the
+   percentage off the order total (rounded half up to the cent) instead of
+   freeing a unit.
+
+## Roulette spin entitlements
+
+`SpinEntitlementService` (`app/services/spin_entitlement.py`) decides which
+activity earns a spin; `SpinPolicy` carries the `ROULETTE_INITIAL_FREE_SPIN`,
+`ROULETTE_SPIN_EVERY_N_PURCHASES` and `REFERRAL_SPINS` settings. Every grant is a
+`roulette_spin_grants` row naming its reason and source — the audit trail — and
+a unique constraint per source keeps each to a single grant:
+
+| Source | Granted by | Keyed on |
+|---|---|---|
+| Welcome spin | `/start`, and a top-up of every customer without one at each bot start (`grant_missing_welcome_spins` in `app/lifecycle.py`) | partial unique index: one `initial_promo` grant per user |
+| Every Nth purchase | `AdminOrderService.set_order_status` on `Completed`, right after the stamp award, same transaction | `order_id` |
+| Referral | `grant_for_referral`, to the referrer, once the referral qualifies | `(referral_id, user_id)` |
+
+A qualifying purchase is a purchase row in the stamp ledger (Completed, placed
+after launch, charged more than €0), numbered among the customer's purchase
+rows; the interval in force when the order completes decides, so changing it
+never grants for past purchases. A replayed completion, a restart or a race can
+never grant twice. `SpinEntitlementService.balance` reports available and used
+spins by reason. The referral payout that will call `grant_for_referral` is not
+wired yet.
+
+## Roulette prize engine
+
+`RouletteEngine` (`app/services/roulette_engine.py`) draws the prize;
+`RouletteService.spin` spends the spin.
+
+- **The server decides.** `PRIZE_CATALOGUE` defines the prizes (+1 and +2
+  stamps, 5% and 10% discounts, a free bottle); `RoulettePolicy` weighs them from
+  the `ROULETTE_PRIZE_*_WEIGHT` settings; the draw is one integer ticket from
+  `secrets.randbelow`, so every chance is exact. `RouletteEngine` requires its
+  policy, so the configured odds can never be skipped. A client only asks to
+  spend the grant its screen offered (`next_grant_id`) and never supplies a
+  prize, type, value or balance; `RouletteService.spin` refuses any prize
+  outside the catalogue, and only the engine calls it.
+- **One transaction.** Locking the account and the grant, marking it consumed,
+  recording the spin (a snapshot of the prize) and applying the prize — ledger
+  stamps, or a `user_rewards` row pointing back at the spin — happen together.
+  A failure rolls all of it back; the spin stays available.
+- **Once per grant.** The grant is locked and `roulette_spins.grant_id` is
+  unique. `RouletteEngine.spin` requires the `grant_id`, so every request is
+  idempotent: a double tap, or the same Telegram update processed again after a
+  restart, finds the grant spent and replays its result (`created=False`). A
+  refused spin — no grant, someone else's grant — writes nothing.
+- **True values.** `RewardService.use_reward` re-checks what it records: a free
+  bottle at its product's price, a discount at exactly its percentage of the
+  order's lines and already taken off the total. `loyalty_health` reports any
+  spin whose prize is missing or does not match what was won.
+- **Real rewards.** A discount is a redeemable `user_rewards` row, used once at
+  checkout; a free bottle is the same kind of row the stamp card issues. Prize
+  display names are the locale keys `roulette.prize.<code>`.
 
 ## Routing
 
@@ -190,6 +245,7 @@ root
 │   ├── /start onboarding
 │   ├── catalog / cart
 │   ├── my stamp card
+│   ├── lucky roulette
 │   ├── checkout
 │   ├── information
 │   └── /admin access-denied for non-admins
@@ -208,7 +264,7 @@ root
 
 ### Onboarding
 
-`/start` → ensure user row → choose language → choose city → main reply keyboard (Catalog / Cart / My Stamp Card / Info).
+`/start` → ensure user row → choose language → choose city → main reply keyboard (Catalog / Cart / My Stamp Card / Lucky Roulette / Info).
 
 ### Catalog → cart
 
@@ -241,6 +297,31 @@ answered "already claimed" (`AlreadyClaimedError`), a card that changed
 meanwhile is redrawn (`StaleCardError`), and a malformed payload is refused
 before the database is touched. The checkout screens do not offer a saved bottle
 yet; `place_order_from_cart(reward_id=…)` supports it at the service level.
+
+### Lucky Roulette
+
+🎰 Lucky Roulette (`app/handlers/user/roulette.py`) shows what the backend
+reports: the spins available, the completed orders still needed for the next one
+(`SpinEntitlementService.purchases_to_next_spin`), the prizes that can be won
+(weight above 0), one line per kind. Opening it is read-only. With a spin,
+a full-width 🎰 Spin! button carries the id of the spin on offer
+(`RouletteEngine.next_grant_id`) and nothing else — no prize, value or balance
+ever travels in a callback. Without one, 🛍 Catalog is the next step. ⬅️ Back
+closes the screen, leaving the main menu.
+
+A tap runs `RouletteEngine.spin(user_id, grant_id=…)` inside a per-customer
+`keyed_lock`: the server draws, spends the spin and books the prize in one
+transaction, committed before anything is shown. Only then comes the suspense —
+turning reels, then a drumroll, 0.8 s each, with no buttons to tap — and the
+result, read back from the saved spin and reward: the prize (a free bottle is
+the jackpot), stamps drawn on the card's own progress bar or a discount or
+bottle saved as a reward, and the spins left with 🎰 Spin again — or, with none
+left, the countdown to the next spin and 🛍 Catalog. A double tap, a stale screen or the same update delivered twice
+finds the spin played and is shown its result; an id that is not the
+customer's spends nothing and the roulette is redrawn; a malformed payload never
+reaches the database; a database failure is rolled back and the customer told
+nothing was lost — the same button retries safely. Won discounts and free
+bottles are saved rewards; the checkout screens do not offer them yet.
 
 ## Admin services (SOLID split)
 
