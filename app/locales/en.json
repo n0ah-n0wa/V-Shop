@@ -160,7 +160,7 @@
   "stamp_card": {
     "title": "<b>🪪 My Stamp Card</b>",
     "progress": "[{bar}] <b>{filled}/{required}</b>",
-    "promo": "Buy e-liquid for {amount}, collect stamps and get your {next}th bottle free! 🎁",
+    "promo": "Buy e-liquid for {amount}, collect stamps and get your {next} bottle free! 🎁",
     "remaining": "🎯 Stamps to your free bottle: <b>{remaining}</b>",
     "empty": "No stamps yet — start collecting with your next order!",
     "ready": "🎉 <b>Your free bottle is ready!</b>",
@@ -205,14 +205,14 @@
     "jackpot": "🏆 <b>Jackpot!</b>",
     "prize_line": "{icon} <b>{prize}</b>",
     "reward_stamps": "🪪 Added to your stamp card:",
-    "card_full": "🎁 Your card is full — claim your free bottle on the stamp card!",
+    "card_full": "🎁 Your card is full — claim your free bottle in “{menu}”!",
     "reward_saved": "✅ Saved to your account — choose it at checkout on your next order.",
     "reward_free_bottle": "✅ Saved to your account: any bottle up to {amount}, free — choose it at checkout.",
     "remaining": "🎟 Spins left: <b>{count}</b>",
     "already_played": "✅ Already spun — here's your prize.",
-    "no_spins_left": "🎟 No spins left — complete orders to earn more.",
+    "no_spins_left": "🎟 No spins left — place orders to earn more.",
     "stale": "🔄 That button was out of date — here's your roulette now.",
-    "failed": "⚠️ Something went wrong — your spin is safe. Please tap Spin again."
+    "failed": "⚠️ Something went wrong — your spin is safe. Please tap “{button}” again."
   },
   "invite": {
     "title": "<b>👥 Invite a Friend</b>",

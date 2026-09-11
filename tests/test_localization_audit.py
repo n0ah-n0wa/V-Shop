@@ -124,6 +124,61 @@ def test_documented_exceptions_are_actually_marked() -> None:
         )
 
 
+# Where customer-facing text is assembled: every word must come from a catalog.
+USER_FACING_TREES = ("handlers", "keyboards", "services", "errors", "utils")
+# Two words of letters in a row: prose, not a key, a callback or a format string.
+PROSE = re.compile(r"[^\W\d_]{2,}\s+[^\W\d_]{2,}")
+# Literals that read like prose but never reach a customer.
+NOT_SHOWN = {
+    "message is not modified": "Telegram's own error text, matched to skip a no-op edit",
+    "not modified": "the same Telegram error text, matched by the statistics screen",
+    "friend joined referral_id=": "log context handed to _give_up, which only logs it",
+    "rewards paid order_id=": "log context handed to _give_up, which only logs it",
+    "V-Shop reviews": "the reviews-group invite link's name, listed to group admins only",
+}
+LOG_OWNERS = {"logger", "logging", "log"}
+
+
+def _developer_text(tree: ast.AST) -> set[int]:
+    """Ids of string nodes only developers read: docstrings, log lines, exception messages."""
+    skip: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            first = node.body[0] if node.body else None
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                skip.add(id(first.value))
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            owner = getattr(getattr(func, "value", None), "id", "")
+            # An exception's message, raised or passed up to Exception.__init__.
+            if owner in LOG_OWNERS or name.endswith(("Error", "Exception")) or name == "__init__":
+                skip.update(id(sub) for sub in ast.walk(node))
+    return skip
+
+
+def test_user_facing_modules_build_no_prose_from_literals() -> None:
+    """
+    Handlers, keyboards, services, error paths and display helpers: no sentence
+    is written in code. The manager alert is the documented exception.
+    """
+    offenders: list[str] = []
+    for path in _py_files(*USER_FACING_TREES):
+        rel = path.relative_to(APP).as_posix()
+        if rel in DOCUMENTED_EXCEPTIONS:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        skip = _developer_text(tree)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+                continue
+            if id(node) in skip or node.value in NOT_SHOWN:
+                continue
+            if PROSE.search(node.value):
+                offenders.append(f"{rel}:{node.lineno} {node.value[:50]!r}")
+    assert not offenders, "prose written in code, not in a catalog: " + "; ".join(offenders)
+
+
 def test_no_undocumented_module_builds_user_prose() -> None:
     """Guard against a new module quietly growing hardcoded UI text."""
     label = re.compile(r'["\'][^"\']*<b>[^"\']*</b>[^"\']*["\']')

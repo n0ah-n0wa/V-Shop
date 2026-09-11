@@ -271,7 +271,10 @@ async def spin_roulette(
             # reached the database after all, the same button replays it.
             await session.rollback()
             logger.exception("Roulette spin failed user_id=%s grant_id=%s", user_id, grant_id)
-            await callback.answer(localized.t("roulette.failed"), show_alert=True)
+            await callback.answer(
+                localized.t("roulette.failed", button=localized.t("roulette.spin")),
+                show_alert=True,
+            )
             return
 
         if outcome is None or result is None:

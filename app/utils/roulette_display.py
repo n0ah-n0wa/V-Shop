@@ -136,7 +136,8 @@ def _where_it_went(result: SpinResultView, i18n: LocalizationService, currency: 
             ),
         ]
         if card.can_claim:
-            lines.append(i18n.t("roulette.card_full"))
+            # Named exactly as the button below and the main menu say it.
+            lines.append(i18n.t("roulette.card_full", menu=i18n.t("menu.stamp_card")))
         return lines
     if result.kind == RoulettePrizeType.FREE_BOTTLE and result.free_bottle_max_price is not None:
         amount = format_amount(result.free_bottle_max_price, i18n, currency, trim_zero_cents=True)

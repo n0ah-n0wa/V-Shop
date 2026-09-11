@@ -40,6 +40,44 @@ def plural_category(language: LanguageCode | str | None, count: int) -> str:
     return "one" if n == 1 else "other"
 
 
+_EN_ORDINAL_SUFFIXES = {1: "st", 2: "nd", 3: "rd"}
+# Ukrainian ordinals end like the numeral's last word: першу, другу, третю,
+# сьому, восьму; every other one — четверту, п'яту, десяту, двадцяту, соту — in
+# -ту, except сорокову and тисячну.
+_UK_FEMININE_ACCUSATIVE = {1: "шу", 2: "гу", 3: "тю", 7: "му", 8: "му"}
+
+
+def feminine_accusative_ordinal(language: LanguageCode | str | None, number: int) -> str:
+    """
+    ``number`` written as an ordinal agreeing with a feminine noun in the accusative.
+
+    What the stamp card's promise needs — "get your 11th bottle free" — for any
+    configured card size. English and German ordinals do not inflect ("21st",
+    "21."); Russian and Ukrainian ones agree with "бутылку" / "пляшку" and are
+    written with the ending of the numeral's last word ("21-ю", "21-шу").
+    """
+    code = normalize_language(language)
+    n = abs(number)
+    if code == LanguageCode.DE.value:
+        return f"{number}."
+    if code == LanguageCode.RU.value:
+        return f"{number}-ю"
+    if code == LanguageCode.UK.value:
+        if 10 <= n % 100 <= 19:
+            ending = "ту"
+        elif n % 10:
+            ending = _UK_FEMININE_ACCUSATIVE.get(n % 10, "ту")
+        elif n % 100 == 40:
+            ending = "ву"
+        elif n and n % 1000 == 0:
+            ending = "ну"
+        else:
+            ending = "ту"
+        return f"{number}-{ending}"
+    suffix = "th" if 10 <= n % 100 <= 19 else _EN_ORDINAL_SUFFIXES.get(n % 10, "th")
+    return f"{number}{suffix}"
+
+
 def flatten_locale(data: dict[str, Any], prefix: str = "") -> dict[str, str]:
     """Flatten nested locale JSON into dotted keys (``menu.catalog``)."""
     flat: dict[str, str] = {}

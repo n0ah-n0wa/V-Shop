@@ -559,7 +559,7 @@ async def test_stamps_that_fill_the_card_point_to_the_free_bottle(
 
     _, text, markup = last(callback.message)
     assert card_progress(EN, 10) in text
-    assert EN.t("roulette.card_full") in text
+    assert EN.t("roulette.card_full", menu=EN.t("menu.stamp_card")) in text
     assert (EN.t("menu.stamp_card"), CALLBACK_STAMP_OPEN) in buttons(markup)
 
 
@@ -698,7 +698,7 @@ async def test_a_failed_spin_loses_nothing_and_the_same_button_retries_it(
     failed = await play(session, user, grant)
     monkeypatch.setattr(RouletteSpinRepository, "create_and_add", original)
 
-    assert failed.alerts == [(EN.t("roulette.failed"), True)]
+    assert failed.alerts == [(EN.t("roulette.failed", button=EN.t("roulette.spin")), True)]
     assert shown_nothing(failed), "no suspense and no result for a spin that did not happen"
     assert await count_rows(session, RouletteSpin) == 0
     assert await available(session, user_id) == 1, "the spin is still there"
@@ -728,7 +728,7 @@ async def test_a_spin_whose_commit_fails_is_undone(
     failed = await play(session, user, grant)
     monkeypatch.setattr(AsyncSession, "commit", real_commit)
 
-    assert failed.alerts == [(EN.t("roulette.failed"), True)]
+    assert failed.alerts == [(EN.t("roulette.failed", button=EN.t("roulette.spin")), True)]
     assert shown_nothing(failed)
     assert (await count_rows(session, RouletteSpin), await count_rows(session, UserReward)) == (
         0,

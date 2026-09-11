@@ -513,8 +513,21 @@ Handlers may use the façade or focused services.
 
 Every **customer-facing** string goes through `i18n.t()`. Enforced by
 `tests/test_localization_audit.py`, which fails the build if a referenced key is
-missing, if the catalogs drift apart, or if a handler/keyboard passes a literal
-string to Telegram.
+missing, if the catalogs drift apart, if a handler/keyboard passes a literal
+string to Telegram, or if handlers, keyboards, services, error paths or display
+helpers write a sentence in code (`NOT_SHOWN` lists the few literals no customer
+sees).
+
+`tests/test_localization_quality.py` keeps each language one voice. Customers
+are addressed formally everywhere — German "Sie" — and the one informal text is
+the message a customer shares with a friend (`invite.share_text*`). Quotes are
+the language's own (“…”, „…“, «…»); German sets a no-break space before `%`, the
+others none; every key carries the same emoji in every language; the loyalty
+features use one word per concept (stamp, reward, spin, free bottle) in each
+language; plural families are complete; money in loyalty texts comes from
+`format_amount`. An ordinal that agrees with its noun — the stamp card's "11th
+bottle" — is rendered by `feminine_accusative_ordinal` (`app/utils/i18n.py`), so
+any configured card size reads right.
 
 **Documented exception — the manager/ops order alert.**
 `app/services/notification.py` builds its field labels in English on purpose, and

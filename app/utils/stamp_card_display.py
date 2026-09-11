@@ -16,6 +16,7 @@ from decimal import Decimal
 
 from app.services.localization import LocalizationService
 from app.services.stamp_card import StampCard
+from app.utils.i18n import feminine_accusative_ordinal
 from app.utils.statistics_display import format_amount
 
 STAMP = "🟢"
@@ -62,7 +63,13 @@ def format_stamp_card(
             filled=card.filled,
             required=card.stamps_required,
         ),
-        i18n.t("stamp_card.promo", amount=amount, next=card.free_bottle_number),
+        # The owner's promise names the free bottle by its ordinal — "11th",
+        # "11.", "11-ю", "11-ту" — which must agree for any configured card size.
+        i18n.t(
+            "stamp_card.promo",
+            amount=amount,
+            next=feminine_accusative_ordinal(i18n.language, card.free_bottle_number),
+        ),
         "",
     ]
     if card.can_claim:
