@@ -279,6 +279,7 @@ root
 │   ├── catalog / cart
 │   ├── my stamp card
 │   ├── lucky roulette
+│   ├── invite a friend
 │   ├── checkout
 │   ├── information
 │   └── /admin access-denied for non-admins
@@ -297,7 +298,7 @@ root
 
 ### Onboarding
 
-`/start` → ensure user row → choose language → choose city → main reply keyboard (Catalog / Cart / My Stamp Card / Lucky Roulette / Info).
+`/start` → ensure user row → choose language → choose city → main reply keyboard (Catalog / Cart / My Stamp Card / Lucky Roulette / Invite a Friend / Info).
 
 ### Catalog → cart
 
@@ -355,6 +356,32 @@ customer's spends nothing and the roulette is redrawn; a malformed payload never
 reaches the database; a database failure is rolled back and the customer told
 nothing was lost — the same button retries safely. Won discounts and free
 bottles are saved rewards; the checkout screens do not offer them yet.
+
+### Invite a Friend
+
+👥 Invite a Friend (`app/handlers/user/invite.py`) shows, all from
+`ReferralProgramService.invitation`: the offer (each side's stamps and the
+referrer's spin, as configured); how it works in three steps (a friend who has
+never ordered opens the link and orders, and the rewards land when that first
+order completes); the personal link (`https://t.me/<bot>?start=ref_<code>` — the
+bot's username from the cached `getMe`, the random code created on the first
+visit and stable after); and the friends who joined, were rewarded or are still
+waiting. The link sits in `<code>`, so a tap copies it; 📤 Send to a friend opens
+Telegram's own share sheet (`https://t.me/share/url`) with a message naming the
+friend's bonus, 📋 Copy link is a `copy_text` button, and ⬅️ Back closes the
+screen. No id appears anywhere, and the screen's only callback closes it. Stamp
+counts go through `LocalizationService.plural` (the CLDR forms under
+`invite.stamps.*`), since the amounts are configurable.
+
+`ReferralNotificationService` (`app/services/referral_notification.py`) closes
+the loop. The referrer hears when a friend joins (last in `/start`, after the
+attribution is committed), and both sides hear when the payout lands (last in
+the admin status change, after its commit; the amounts are read back from the
+ledger by `ReferralProgramService.payout_for_order`). The referrer's messages
+carry the 📤 button for the next invite. No message names the other side, and
+failures are logged and swallowed. The newcomer's own `/start` replies stay
+identical whatever the code, so nothing tells a guesser that a code was real;
+only a customer opening their own link — who owns the code — is told it works.
 
 ## Admin services (SOLID split)
 

@@ -34,6 +34,9 @@ catalog, orders, statistics and broadcasts — from inside Telegram.
 - 🎰 Lucky Roulette: a welcome spin, and one for every 5th completed order
   (configurable); every spin wins stamps, a discount or a free bottle, drawn by
   the server
+- 👥 Invite a Friend: a personal link to share; when the friend's first order
+  is completed, both get +2 stamps (configurable) and the referrer a spin — the
+  referrer hears when a friend joins, and both hear when the rewards land
 - Information pages, and an invite link to the private reviews group
 - Language and city can be changed at any time from Information
 

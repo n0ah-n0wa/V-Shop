@@ -170,6 +170,14 @@ class ReferralService:
     async def get_for_referred_user(self, user_id: int) -> Referral | None:
         return await self.referrals.get_by_referred_user_id(user_id)
 
+    async def counts_for_referrer(self, user_id: int) -> tuple[int, int]:
+        """Read-only: ``(invited, qualified)`` for the friends a customer referred."""
+        return await self.referrals.count_for_referrer(user_id)
+
+    async def get_qualified_by_order(self, order_id: int) -> Referral | None:
+        """Read-only: the referral ``order_id`` qualified, if it qualified one."""
+        return await self.referrals.get_by_qualifying_order_id(order_id)
+
     async def _leads_back_to(self, referrer_user_id: int, target: int) -> bool:
         """
         Whether ``target`` is up ``referrer_user_id``'s referral chain.

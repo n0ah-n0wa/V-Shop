@@ -2,7 +2,7 @@
 
 from aiogram import Router
 
-from . import admin_guard, cart, catalog, checkout, info, roulette, stamp_card, start
+from . import admin_guard, cart, catalog, checkout, info, invite, roulette, stamp_card, start
 
 
 def get_user_router() -> Router:
@@ -16,6 +16,7 @@ def get_user_router() -> Router:
     # free-text steps, not be read as the customer's name or address.
     router.include_router(stamp_card.router)
     router.include_router(roulette.router)
+    router.include_router(invite.router)
     router.include_router(checkout.router)
     router.include_router(info.router)
     # Non-admin /admin denial (must not be behind admin router filters)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -16,10 +16,17 @@ from app.keyboards.reply import main_menu_keyboard
 from app.models.enums import CityChoice, LanguageCode
 from app.models.user import User
 from app.services.localization import LocalizationService
-from app.services.referral_program import ReferralPolicy, ReferralProgramService
+from app.services.referral_notification import ReferralNotificationService
+from app.services.referral_program import (
+    ReferralAttempt,
+    ReferralOutcome,
+    ReferralPolicy,
+    ReferralProgramService,
+)
 from app.services.spin_entitlement import SpinEntitlementService, SpinPolicy
 from app.services.user import UserService
 from app.states.onboarding import OnboardingStates
+from app.utils.invite_display import own_link_note
 from app.utils.telegram_ui import as_message
 
 logger = logging.getLogger(__name__)
@@ -77,6 +84,31 @@ async def _clear_inline_keyboard(callback: CallbackQuery) -> None:
         logger.debug("Could not clear inline keyboard", exc_info=True)
 
 
+async def _follow_up_referral_link(
+    attempt: ReferralAttempt,
+    message: Message,
+    user: User,
+    *,
+    session: AsyncSession,
+    settings: Settings,
+    bot: Bot | None,
+) -> None:
+    """What a referral link adds once the customer has had their usual answer."""
+    if attempt.outcome == ReferralOutcome.SELF_REFERRAL:
+        # Only the code's owner can land here, so this tells nobody anything
+        # new — and customers do open their own link to check that it works.
+        await message.answer(own_link_note(LocalizationService.from_user(user)))
+    elif (
+        attempt.outcome == ReferralOutcome.ATTRIBUTED
+        and attempt.referral is not None
+        and bot is not None  # aiogram always passes it; a direct call may not
+    ):
+        # To the referrer, never the newcomer. Read-only; swallows its failures.
+        await ReferralNotificationService(session, bot, settings=settings).friend_joined(
+            attempt.referral
+        )
+
+
 @router.message(CommandStart())
 async def cmd_start(
     message: Message,
@@ -84,13 +116,16 @@ async def cmd_start(
     session: AsyncSession,
     settings: Settings,
     command: CommandObject | None = None,
+    bot: Bot | None = None,
 ) -> None:
     """
     Entry point.
 
     First launch: language → city → main menu.
     Returning users skip steps already saved in the database.
-    A friend's referral link arrives as ``/start ref_<code>``.
+    A friend's referral link arrives as ``/start ref_<code>``. Whatever the
+    code, the newcomer is answered exactly as for a plain /start — no reply
+    tells a guesser that a code was real — and the referrer is told apart.
     """
     if message.from_user is None:
         return
@@ -102,6 +137,7 @@ async def cmd_start(
     await SpinEntitlementService(session, SpinPolicy.from_settings(settings)).grant_welcome_spin(
         user.id
     )
+    attempt: ReferralAttempt | None = None
     if command is not None and command.args:
         # Untrusted: anything that is not a valid, applicable referral is an
         # outcome, never an error, and onboarding carries on regardless.
@@ -109,6 +145,9 @@ async def cmd_start(
             session, ReferralPolicy.from_settings(settings)
         ).attribute_from_start(user.id, command.args)
         logger.info("/start referral telegram_id=%s outcome=%s", user.telegram_id, attempt.outcome)
+        if attempt.outcome == ReferralOutcome.ATTRIBUTED:
+            # Durable before the referrer is told, at the end of this handler.
+            await session.commit()
     i18n = LocalizationService.from_user(user)
 
     logger.info(
@@ -118,6 +157,10 @@ async def cmd_start(
         user.selected_city,
     )
     await _continue_onboarding(message, user, i18n, state)
+    if attempt is not None:
+        await _follow_up_referral_link(
+            attempt, message, user, session=session, settings=settings, bot=bot
+        )
 
 
 @router.callback_query(F.data.startswith("lang:"))

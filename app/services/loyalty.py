@@ -124,6 +124,11 @@ class LoyaltyService:
     async def history(self, user_id: int, *, limit: int = 50) -> list[LoyaltyTransaction]:
         return await self.transactions.list_for_user(user_id, limit=limit)
 
+    async def referral_bonus(self, user_id: int, *, referral_id: int) -> int:
+        """Read-only: the stamps a referral credited this customer — 0 if none."""
+        row = await self.transactions.get_for_referral(referral_id, user_id)
+        return row.amount if row is not None else 0
+
     # --- earning ------------------------------------------------------------------
 
     async def record_purchase(self, user_id: int, *, order_id: int, stamps: int) -> LedgerPosting:

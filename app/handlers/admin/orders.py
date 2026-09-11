@@ -36,6 +36,7 @@ from app.models.order import Order
 from app.services.admin import AdminService, InvalidStatusTransitionError
 from app.services.customer_notification import CustomerOrderNotificationService
 from app.services.localization import LocalizationService
+from app.services.referral_notification import ReferralNotificationService
 from app.states.admin import ADMIN_WIZARD_STATES, SearchOrderStates
 from app.utils.admin_order import format_admin_order_card
 from app.utils.telegram_ui import as_message, clamp_page, edit_or_answer, page_count
@@ -489,13 +490,16 @@ async def change_order_status(
         )
     )
     view_target = as_message(callback)
-    if view_target is None:
-        return
-    await _send_order_view(
-        view_target,
-        i18n,
-        order,
-        list_kind=list_kind,
-        page=page,
-        edit=True,
-    )
+    if view_target is not None:
+        await _send_order_view(
+            view_target,
+            i18n,
+            order,
+            list_kind=list_kind,
+            page=page,
+            edit=True,
+        )
+    if order.status == OrderStatus.COMPLETED:
+        # Last, after the commit: tell both sides of a referral this completion
+        # paid out, if it paid one. Read-only, and it swallows its own failures.
+        await ReferralNotificationService(session, bot, settings=settings).rewards_paid(order.id)

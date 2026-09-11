@@ -11,6 +11,7 @@ from app.utils.i18n import (
     DEFAULT_LANGUAGE,
     SUPPORTED_LANGUAGES,
     normalize_language,
+    plural_category,
     translate,
 )
 
@@ -52,6 +53,15 @@ class LocalizationService:
     def n(self, *parts: str) -> str:
         """Join dotted key parts then translate (``i18n.n('menu', 'catalog')``)."""
         return self.t(".".join(parts))
+
+    def plural(self, key: str, count: int, **kwargs: object) -> str:
+        """
+        The form of ``key`` that fits ``count`` in this language, ``{count}`` filled in.
+
+        ``i18n.plural("invite.stamps", 5)`` reads ``invite.stamps.many`` in Russian
+        ("+5 штампов") and ``invite.stamps.other`` in English ("+5 stamps").
+        """
+        return self.t(f"{key}.{plural_category(self._language, count)}", count=count, **kwargs)
 
     @classmethod
     def default(cls) -> LocalizationService:

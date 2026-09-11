@@ -193,6 +193,10 @@ class SpinEntitlementService:
         """Every grant, oldest first: its reason, its source, when granted and spent."""
         return await self.grants.list_for_user(user_id)
 
+    async def has_referral_spin(self, referral_id: int, *, user_id: int) -> bool:
+        """Read-only: whether a referral's spin was granted to ``user_id``, its referrer."""
+        return await self.grants.get_for_referral(referral_id, user_id) is not None
+
     async def purchases_to_next_spin(self, user_id: int) -> int | None:
         """
         Read-only: qualifying purchases this customer still needs for their next spin.

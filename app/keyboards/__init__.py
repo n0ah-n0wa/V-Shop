@@ -25,6 +25,7 @@ from app.keyboards.checkout import (
 )
 from app.keyboards.info import info_back_keyboard, info_menu_keyboard
 from app.keyboards.inline import city_keyboard, language_keyboard
+from app.keyboards.invite import invite_keyboard
 from app.keyboards.product import add_to_cart_keyboard, product_added_keyboard
 from app.keyboards.reply import main_menu_keyboard, remove_keyboard
 from app.keyboards.roulette import roulette_keyboard, spin_result_keyboard
@@ -51,6 +52,7 @@ __all__ = [
     "delivery_keyboard",
     "info_back_keyboard",
     "info_menu_keyboard",
+    "invite_keyboard",
     "language_keyboard",
     "main_menu_keyboard",
     "product_added_keyboard",

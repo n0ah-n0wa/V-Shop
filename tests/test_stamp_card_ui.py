@@ -237,6 +237,7 @@ def test_the_main_menu_offers_the_stamp_card(language: str) -> None:
         [i18n.t("menu.catalog"), i18n.t("menu.cart")],
         [i18n.t("menu.stamp_card")],
         [i18n.t("menu.roulette")],
+        [i18n.t("menu.invite")],
         [i18n.t("menu.info")],
     ]
     assert i18n.t("menu.stamp_card").startswith("🪪 ")

@@ -101,6 +101,23 @@ class ReferralPayout:
     spin_granted: bool
 
 
+@dataclass(frozen=True, slots=True)
+class Invitation:
+    """What a customer's invite screen shows — every figure from the backend."""
+
+    link: str  # https://t.me/<bot>?start=ref_<code>: a random code, never an id
+    referrer_stamps: int
+    referred_stamps: int
+    referrer_spins: int
+    invited: int  # friends who joined through the link
+    rewarded: int  # of those, the ones whose first order has paid out
+
+    @property
+    def waiting(self) -> int:
+        """Friends who joined but whose first order has not completed yet."""
+        return self.invited - self.rewarded
+
+
 class ReferralProgramService:
     def __init__(
         self,
@@ -125,6 +142,47 @@ class ReferralProgramService:
     async def referral_link(self, user_id: int, *, bot_username: str) -> str:
         """The customer's personal deep link into the bot."""
         return referral_link(bot_username, await self.referral_code(user_id))
+
+    async def invitation(self, user_id: int, *, bot_username: str) -> Invitation:
+        """
+        The customer's link, what it pays each side, and the friends it brought in.
+
+        Creates the customer's code on first use; everything else is read-only.
+        """
+        link = await self.referral_link(user_id, bot_username=bot_username)
+        invited, rewarded = await self.referrals.counts_for_referrer(user_id)
+        return Invitation(
+            link=link,
+            referrer_stamps=self.policy.referrer_stamps,
+            referred_stamps=self.policy.referred_stamps,
+            referrer_spins=self.spins.policy.referral_spins,
+            invited=invited,
+            rewarded=rewarded,
+        )
+
+    async def payout_for_order(self, order_id: int) -> ReferralPayout | None:
+        """
+        Read-only: what the referral ``order_id`` qualified paid each side.
+
+        ``None`` unless the order qualified one. The stamps and the spin are read
+        back from the ledger and the spin grants — what was booked, whatever the
+        settings say now.
+        """
+        referral = await self.referrals.get_qualified_by_order(order_id)
+        if referral is None:
+            return None
+        return ReferralPayout(
+            referral=referral,
+            referred_stamps=await self.loyalty.referral_bonus(
+                referral.referred_user_id, referral_id=referral.id
+            ),
+            referrer_stamps=await self.loyalty.referral_bonus(
+                referral.referrer_user_id, referral_id=referral.id
+            ),
+            spin_granted=await self.spins.has_referral_spin(
+                referral.id, user_id=referral.referrer_user_id
+            ),
+        )
 
     # --- attribution --------------------------------------------------------------
 

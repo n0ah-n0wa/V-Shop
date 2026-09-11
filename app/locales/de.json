@@ -35,7 +35,8 @@
     "cart": "🛒 Warenkorb",
     "info": "ℹ Informationen",
     "stamp_card": "🪪 Meine Stempelkarte",
-    "roulette": "🎰 Glücksrad"
+    "roulette": "🎰 Glücksrad",
+    "invite": "👥 Freunde einladen"
   },
   "catalog": {
     "title": "🛍 Katalog",
@@ -204,6 +205,49 @@
     "no_spins_left": "🎟 Keine Drehungen mehr — mit abgeschlossenen Bestellungen verdienen Sie neue.",
     "stale": "🔄 Dieser Button war veraltet — hier ist Ihr aktuelles Glücksrad.",
     "failed": "⚠️ Etwas ist schiefgelaufen — Ihre Drehung bleibt erhalten. Bitte tippen Sie erneut auf „Drehen“."
+  },
+  "invite": {
+    "title": "<b>👥 Freunde einladen</b>",
+    "offer": "🎁 Teilen Sie Ihren Link mit einem Freund: Ihr Freund bekommt <b>{friend}</b> zum Start, und Sie bekommen <b>{you}</b> auf Ihre Karte!",
+    "offer_friend": "🎁 Teilen Sie Ihren Link mit einem Freund: Ihr Freund bekommt <b>{friend}</b> zum Start!",
+    "offer_you": "🎁 Teilen Sie Ihren Link mit einem Freund: Sie bekommen <b>{you}</b> auf Ihre Karte!",
+    "offer_plain": "🎁 Teilen Sie Ihren Link mit einem Freund!",
+    "spin_bonus": "🎰 Dazu eine Drehung am Glücksrad für Sie!",
+    "spin": "🎰 Und Sie bekommen eine Drehung am Glücksrad!",
+    "stamps": {
+      "one": "+{count} Stempel",
+      "few": "+{count} Stempel",
+      "many": "+{count} Stempel",
+      "other": "+{count} Stempel"
+    },
+    "how_title": "<b>So funktioniert's</b>",
+    "step_send": "1. Senden Sie Ihren Link an jemanden, der bei uns noch nicht bestellt hat.",
+    "step_order": "2. Ihr Freund öffnet den Bot über den Link und bestellt.",
+    "step_both": "3. Sobald diese erste Bestellung abgeschlossen ist, bekommen Sie beide Ihre Prämien.",
+    "step_friend": "3. Sobald diese erste Bestellung abgeschlossen ist, bekommt Ihr Freund die Stempel.",
+    "step_you": "3. Sobald diese erste Bestellung abgeschlossen ist, bekommen Sie Ihre Prämie.",
+    "link": "🔗 <b>Ihr persönlicher Link</b> — zum Kopieren antippen:\n<code>{link}</code>",
+    "stats": "Freunde beigetreten: <b>{invited}</b> · Prämien erhalten: <b>{rewarded}</b>",
+    "waiting": "Warten auf die erste Bestellung: <b>{waiting}</b>",
+    "no_friends": "Über Ihren Link ist noch niemand beigetreten.",
+    "cta": "👇 Senden Sie ihn über die Schaltfläche unten an einen Freund.",
+    "share": "📤 An einen Freund senden",
+    "copy": "📋 Link kopieren",
+    "share_text": "🎁 Komm zu Cheshire Vape! Öffne den Bot über diesen Link und hol dir mit deiner ersten Bestellung {stamps} für eine Gratisflasche.",
+    "share_text_plain": "🛍 Komm zu Cheshire Vape! Hier ist mein Link zum Bot.",
+    "own_link": "👋 Das ist Ihr eigener Einladungslink — und er funktioniert! Teilen Sie ihn über „{menu}“.",
+    "news": {
+      "joined": "🙌 <b>Über Ihren Link ist ein Freund beigetreten!</b>",
+      "joined_stamps_spin": "Sobald die erste Bestellung abgeschlossen ist, bekommen Sie <b>{stamps}</b> und eine Drehung am Glücksrad.",
+      "joined_stamps": "Sobald die erste Bestellung abgeschlossen ist, bekommen Sie <b>{stamps}</b>.",
+      "joined_spin": "Sobald die erste Bestellung abgeschlossen ist, bekommen Sie eine Drehung am Glücksrad.",
+      "paid": "🎉 <b>Ihre Einladung hat sich gelohnt!</b>\nDie erste Bestellung Ihres Freundes ist abgeschlossen.",
+      "stamps_added": "🪪 Auf Ihre Karte gebucht: <b>{stamps}</b>",
+      "spin_added": "🎰 Eine Drehung am Glücksrad wartet auf Sie!",
+      "more": "Jeder Freund, dessen erste Bestellung abgeschlossen ist, bringt Ihnen das Gleiche noch einmal 👇",
+      "welcome_bonus": "🎁 <b>Die Einladung Ihres Freundes hat sich gelohnt!</b>",
+      "your_turn": "Jetzt sind Sie dran: Laden Sie Ihre Freunde über „{menu}“ ein."
+    }
   },
   "error": {
     "generic": "⚠️ Ein unerwarteter Fehler ist aufgetreten. Bitte versuche es später erneut.",

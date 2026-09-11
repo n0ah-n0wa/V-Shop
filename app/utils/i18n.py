@@ -16,6 +16,28 @@ from app.models.enums import LanguageCode
 LOCALES_DIR = Path(__file__).resolve().parent.parent / "locales"
 SUPPORTED_LANGUAGES: tuple[str, ...] = tuple(code.value for code in LanguageCode)
 DEFAULT_LANGUAGE = LanguageCode.EN.value
+# A pluralised key ``a.b`` holds one entry per CLDR category — ``a.b.one``,
+# ``a.b.few``, ``a.b.many``, ``a.b.other`` — in every catalog, since the catalogs
+# must share their keys; each language uses the categories its grammar has.
+PLURAL_FORMS: tuple[str, ...] = ("one", "few", "many", "other")
+_SLAVIC_PLURALS = frozenset({LanguageCode.RU.value, LanguageCode.UK.value})
+
+
+def plural_category(language: LanguageCode | str | None, count: int) -> str:
+    """
+    The CLDR cardinal plural category of ``count`` in ``language``.
+
+    Russian and Ukrainian: one (1, 21, 101), few (2-4, 22-24), many (0, 5-20,
+    25-30, 111); English and German: one (1) or other.
+    """
+    n = abs(count)
+    if normalize_language(language) in _SLAVIC_PLURALS:
+        if n % 10 == 1 and n % 100 != 11:
+            return "one"
+        if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+            return "few"
+        return "many"
+    return "one" if n == 1 else "other"
 
 
 def flatten_locale(data: dict[str, Any], prefix: str = "") -> dict[str, str]:

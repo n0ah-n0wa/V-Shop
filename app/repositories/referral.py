@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.enums import ReferralStatus
 from app.models.referral import Referral
 from app.repositories.base import BaseRepository
 
@@ -24,6 +25,24 @@ class ReferralRepository(BaseRepository[Referral]):
             select(Referral).where(Referral.referred_user_id == user_id)
         )
         return result.first()
+
+    async def get_by_qualifying_order_id(self, order_id: int) -> Referral | None:
+        result = await self.session.scalars(
+            select(Referral).where(Referral.qualifying_order_id == order_id)
+        )
+        return result.first()
+
+    async def count_for_referrer(self, user_id: int) -> tuple[int, int]:
+        """``(invited, qualified)``: the referrals a customer made, and those that paid out."""
+        row = (
+            await self.session.execute(
+                select(
+                    func.count(),
+                    func.count(case((Referral.status == ReferralStatus.QUALIFIED, 1))),
+                ).where(Referral.referrer_user_id == user_id)
+            )
+        ).one()
+        return int(row[0]), int(row[1])
 
     async def lock_attributions(self) -> None:
         """

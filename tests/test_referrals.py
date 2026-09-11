@@ -627,14 +627,24 @@ def test_attribution_and_payout_each_have_one_entry_point() -> None:
 
 
 def test_no_button_or_callback_touches_referrals() -> None:
-    """The only way in is /start: no callback can name a referrer or trigger a payout."""
+    """
+    The only way in is /start: no callback can name a referrer or trigger a payout.
+
+    The 👥 Invite a Friend screen reads the customer's own link and nothing more,
+    and the admin's order status change only sends the news of a payout its
+    completion already made; ``tests/test_invite_ui.py`` pins both.
+    """
     touching = sorted(
         path.relative_to(ROOT).as_posix()
         for folder in ("handlers", "keyboards", "middlewares", "filters")
         for path in (ROOT / "app" / folder).rglob("*.py")
         if "referral" in path.read_text(encoding="utf-8").lower()
     )
-    assert touching == ["app/handlers/user/start.py"]
+    assert touching == [
+        "app/handlers/admin/orders.py",
+        "app/handlers/user/invite.py",
+        "app/handlers/user/start.py",
+    ]
 
 
 # ==================================================================== exploits

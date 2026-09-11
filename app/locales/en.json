@@ -35,7 +35,8 @@
     "cart": "🛒 Cart",
     "info": "ℹ Information",
     "stamp_card": "🪪 My Stamp Card",
-    "roulette": "🎰 Lucky Roulette"
+    "roulette": "🎰 Lucky Roulette",
+    "invite": "👥 Invite a Friend"
   },
   "catalog": {
     "title": "🛍 Catalog",
@@ -204,6 +205,49 @@
     "no_spins_left": "🎟 No spins left — complete orders to earn more.",
     "stale": "🔄 That button was out of date — here's your roulette now.",
     "failed": "⚠️ Something went wrong — your spin is safe. Please tap Spin again."
+  },
+  "invite": {
+    "title": "<b>👥 Invite a Friend</b>",
+    "offer": "🎁 Share your link with a friend: your friend gets <b>{friend}</b> to start, and you get <b>{you}</b> on your card!",
+    "offer_friend": "🎁 Share your link with a friend: your friend gets <b>{friend}</b> to start!",
+    "offer_you": "🎁 Share your link with a friend: you get <b>{you}</b> on your card!",
+    "offer_plain": "🎁 Share your link with a friend!",
+    "spin_bonus": "🎰 Plus a Lucky Roulette spin for you!",
+    "spin": "🎰 You get a Lucky Roulette spin!",
+    "stamps": {
+      "one": "+{count} stamp",
+      "few": "+{count} stamps",
+      "many": "+{count} stamps",
+      "other": "+{count} stamps"
+    },
+    "how_title": "<b>How it works</b>",
+    "step_send": "1. Send your link to a friend who hasn't ordered from us yet.",
+    "step_order": "2. Your friend opens the bot with it and places an order.",
+    "step_both": "3. Once that first order is completed, you both get your rewards.",
+    "step_friend": "3. Once that first order is completed, your friend gets their stamps.",
+    "step_you": "3. Once that first order is completed, you get your reward.",
+    "link": "🔗 <b>Your personal link</b> — tap it to copy:\n<code>{link}</code>",
+    "stats": "Friends joined: <b>{invited}</b> · rewards earned: <b>{rewarded}</b>",
+    "waiting": "Waiting for their first order: <b>{waiting}</b>",
+    "no_friends": "No one has joined with your link yet.",
+    "cta": "👇 Send it to a friend with the button below.",
+    "share": "📤 Send to a friend",
+    "copy": "📋 Copy link",
+    "share_text": "🎁 Join me at Cheshire Vape! Open the bot with this link and get {stamps} towards a free bottle with your first order.",
+    "share_text_plain": "🛍 Join me at Cheshire Vape! Here's my link to the bot.",
+    "own_link": "👋 That's your own invite link — and it works! Send it to friends from “{menu}”.",
+    "news": {
+      "joined": "🙌 <b>A friend just joined with your link!</b>",
+      "joined_stamps_spin": "Once their first order is completed, you'll get <b>{stamps}</b> and a Lucky Roulette spin.",
+      "joined_stamps": "Once their first order is completed, you'll get <b>{stamps}</b>.",
+      "joined_spin": "Once their first order is completed, you'll get a Lucky Roulette spin.",
+      "paid": "🎉 <b>Your invite paid off!</b>\nA friend you invited has completed their first order.",
+      "stamps_added": "🪪 Added to your card: <b>{stamps}</b>",
+      "spin_added": "🎰 A Lucky Roulette spin is waiting for you!",
+      "more": "Every friend whose first order is completed earns you the same again 👇",
+      "welcome_bonus": "🎁 <b>Your friend's invite paid off!</b>",
+      "your_turn": "Now it's your turn: invite your friends from “{menu}”."
+    }
   },
   "error": {
     "generic": "⚠️ An unexpected error occurred. Please try again later.",
