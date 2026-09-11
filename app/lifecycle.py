@@ -14,31 +14,42 @@ from app.database.session import (
     init_db,
     log_database_identity,
 )
-from app.services.spin_entitlement import SpinEntitlementService, SpinPolicy
+from app.services.loyalty_activation import ActivationReport, LoyaltyActivationService
+from app.services.spin_entitlement import SpinPolicy
 
 logger = logging.getLogger(__name__)
 
 
-async def grant_missing_welcome_spins(settings: Settings) -> int | None:
+async def activate_loyalty(settings: Settings) -> ActivationReport | None:
     """
-    Give every customer still without one their welcome roulette spin.
+    Bring every existing customer into the loyalty programme: an account, and
+    their one welcome roulette spin.
 
-    Idempotent, so it runs on every start: one statement that skips anyone who
-    has had a welcome spin, spent or not, and a unique index that rules out a
-    second — restarts and redeploys never grant again. A failure (migrations
-    not applied yet, say) is logged and never stops the bot. Returns how many
-    were granted, or ``None`` when it could not run.
+    Idempotent, so it runs on every start: one statement each that skips
+    customers who already have the row — a welcome spin spent long ago
+    included — behind a unique constraint that rules out a second, so restarts
+    and redeploys add nothing. Orders are never read or written. A failure
+    (migrations not applied yet, say) is logged and never stops the bot.
+    Returns what was added, or ``None`` when it could not run.
     """
     try:
         async with get_session_factory()() as session:
-            created = await SpinEntitlementService(
+            report = await LoyaltyActivationService(
                 session, SpinPolicy.from_settings(settings)
-            ).grant_missing_welcome_spins()
+            ).activate_everyone()
             await session.commit()
     except Exception:
-        logger.exception("Could not grant missing welcome spins; the bot starts without them")
+        logger.exception(
+            "Could not activate loyalty for existing customers (accounts, welcome spins); "
+            "the bot starts without them"
+        )
         return None
-    return created
+    logger.info(
+        "Loyalty activation: accounts_opened=%s welcome_spins_granted=%s",
+        report.accounts_opened,
+        report.welcome_spins_granted,
+    )
+    return report
 
 
 async def on_startup(bot: Bot, settings: Settings) -> None:
@@ -48,7 +59,8 @@ async def on_startup(bot: Bot, settings: Settings) -> None:
     - Initialize DB engine / session factory
     - Verify PostgreSQL connectivity
     - Record which database cluster we attached to (read-only, diagnostic)
-    - Give customers still without one their welcome roulette spin (idempotent)
+    - Bring existing customers into the loyalty programme: any missing account
+      and welcome roulette spin (idempotent; orders untouched)
     - Drop webhook (long-polling mode)
     - Confirm Telegram authorization via getMe
     """
@@ -57,7 +69,7 @@ async def on_startup(bot: Bot, settings: Settings) -> None:
     await init_db()
     await check_db_connection()
     await log_database_identity()
-    await grant_missing_welcome_spins(settings)
+    await activate_loyalty(settings)
 
     await bot.delete_webhook(drop_pending_updates=True)
 

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.cart import Cart
 from app.models.enums import CityChoice, DeliveryType, OrderStatus, PaymentMethod
 from app.models.order import Order
 from app.models.user import User
@@ -15,7 +18,7 @@ from app.repositories.cart_item import CartItemRepository
 from app.repositories.order import OrderRepository
 from app.repositories.order_item import OrderItemRepository
 from app.repositories.product import ProductRepository
-from app.services.reward import RewardPlan, RewardService
+from app.services.reward import Line, RewardOption, RewardPlan, RewardService
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,27 @@ def delivery_allowed_for_city(city: str | CityChoice, delivery_type: str) -> boo
     if city_value == CityChoice.DELIVERY.value:
         return delivery_type in _OTHER_DELIVERY
     return False
+
+
+@dataclass(frozen=True, slots=True)
+class CheckoutQuote:
+    """
+    What confirming checkout will charge — computed as placing the order computes it.
+
+    ``reward`` is the reward the customer chose, while it still applies to the
+    cart; the total then has its saving taken off.
+    """
+
+    subtotal: Decimal
+    reward: RewardOption | None = None
+
+    @property
+    def total(self) -> Decimal:
+        return self.subtotal - self.reward.saving if self.reward is not None else self.subtotal
+
+
+def _lines_total(lines: Sequence[Line]) -> Decimal:
+    return sum((price * quantity for _, quantity, price in lines), Decimal("0"))
 
 
 class OrderService:
@@ -93,28 +117,8 @@ class OrderService:
         if cart is None or not cart.items:
             raise EmptyCartError("Cart is empty")
 
-        # One query decides sellability for the whole cart: a product hidden by
-        # its brand or category must not be sold, only browsed-away.
-        unsellable = await self.products.list_unsellable_ids(
-            [item.product_id for item in cart.items]
-        )
-
-        line_items: list[tuple[int, int, Decimal]] = []
-        total = Decimal("0")
-        for item in cart.items:
-            product = item.product
-            if product is None:
-                continue
-            if product.id in unsellable:
-                raise InactiveProductError(
-                    f"Product {product.id} is not available and cannot be ordered"
-                )
-            unit_price = Decimal(product.price)
-            total += unit_price * item.quantity
-            line_items.append((product.id, item.quantity, unit_price))
-
-        if not line_items:
-            raise EmptyCartError("Cart is empty")
+        line_items = await self._priced_lines(cart)
+        total = _lines_total(line_items)
 
         rewards = RewardService(self.session)
         plan: RewardPlan | None = None
@@ -160,3 +164,69 @@ class OrderService:
             saved.total_price,
         )
         return saved
+
+    async def reward_options(self, user: User) -> list[RewardOption]:
+        """
+        Read-only: the customer's rewards that could be used on the cart as it stands.
+
+        Empty when the cart cannot be ordered — confirming then says why.
+        """
+        lines = await self._orderable_lines(user.id)
+        if lines is None:
+            return []
+        return await RewardService(self.session).options(user.id, lines=lines)
+
+    async def quote(self, user: User, *, reward_id: int | None = None) -> CheckoutQuote | None:
+        """
+        Read-only: what the cart would be charged, with ``reward_id`` taken off.
+
+        ``None`` when the cart cannot be ordered. A reward that no longer applies
+        — used meanwhile, or the cart changed — is left out of the quote, and
+        :meth:`place_order_from_cart` re-checks the chosen one under lock.
+        """
+        lines = await self._orderable_lines(user.id)
+        if lines is None:
+            return None
+        chosen: RewardOption | None = None
+        if reward_id is not None:
+            options = await RewardService(self.session).options(user.id, lines=lines)
+            chosen = next((option for option in options if option.reward_id == reward_id), None)
+        return CheckoutQuote(subtotal=_lines_total(lines), reward=chosen)
+
+    async def _priced_lines(self, cart: Cart) -> list[Line]:
+        """
+        The cart as order lines at today's prices — the one pricing checkout uses.
+
+        Raises :class:`InactiveProductError` if something in it can no longer be
+        sold, and :class:`EmptyCartError` if nothing is left to order.
+        """
+        # One query decides sellability for the whole cart: a product hidden by
+        # its brand or category must not be sold, only browsed-away.
+        unsellable = await self.products.list_unsellable_ids(
+            [item.product_id for item in cart.items]
+        )
+
+        lines: list[Line] = []
+        for item in cart.items:
+            product = item.product
+            if product is None:
+                continue
+            if product.id in unsellable:
+                raise InactiveProductError(
+                    f"Product {product.id} is not available and cannot be ordered"
+                )
+            lines.append((product.id, item.quantity, Decimal(product.price)))
+
+        if not lines:
+            raise EmptyCartError("Cart is empty")
+        return lines
+
+    async def _orderable_lines(self, user_id: int) -> list[Line] | None:
+        """The cart as :meth:`place_order_from_cart` would price it, or ``None``."""
+        cart = await self.carts.get_by_user_id_with_items(user_id)
+        if cart is None or not cart.items:
+            return None
+        try:
+            return await self._priced_lines(cart)
+        except (EmptyCartError, InactiveProductError):
+            return None

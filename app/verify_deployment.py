@@ -69,8 +69,10 @@ async def loyalty_health(session: AsyncSession) -> dict[str, dict[str, int]]:
     ``integrity`` counts states the services never produce, so every value must
     be 0 — anything else means rows were changed behind their back, and the
     ledger is the record to trust. ``coverage`` counts customers without their
-    loyalty rows: welcome spins are granted at ``/start`` and topped up on every
-    bot start, so that count is 0 after one; accounts are created on first use.
+    loyalty rows: accounts are opened at registration and welcome spins at
+    ``/start``, and every bot start backfills anyone missing either
+    (``LoyaltyActivationService``), so both are 0 after one — the welcome-spin
+    count only while ``ROULETTE_INITIAL_FREE_SPIN`` is on.
     """
 
     async def count(statement: Select[Any]) -> int:

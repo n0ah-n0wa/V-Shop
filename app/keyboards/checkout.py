@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -17,6 +19,10 @@ CALLBACK_DELIVERY_PREFIX = "checkout:delivery:"
 CALLBACK_PAYMENT_PREFIX = "checkout:pay:"
 CALLBACK_CONFIRM = "checkout:confirm"
 CALLBACK_CANCEL = "checkout:cancel"
+# checkout:reward:{reward_id} — only the id travels: the server re-checks that it
+# is one of this customer's rewards and what it is worth on this cart.
+CALLBACK_REWARD_PREFIX = "checkout:reward:"
+CALLBACK_REWARD_NONE = f"{CALLBACK_REWARD_PREFIX}none"
 
 
 def delivery_keyboard(i18n: LocalizationService, city: CityChoice | str) -> InlineKeyboardMarkup:
@@ -102,6 +108,27 @@ def remove_reply_keyboard() -> ReplyKeyboardRemove:
     from app.keyboards.reply import remove_keyboard
 
     return remove_keyboard()
+
+
+def reward_keyboard(
+    i18n: LocalizationService, options: Sequence[tuple[int, str]]
+) -> InlineKeyboardMarkup:
+    """One button per usable reward — ``(reward_id, label)`` — then none, then cancel."""
+    rows = [
+        [InlineKeyboardButton(text=label, callback_data=f"{CALLBACK_REWARD_PREFIX}{reward_id}")]
+        for reward_id, label in options
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=i18n.t("checkout.reward_skip"), callback_data=CALLBACK_REWARD_NONE
+            )
+        ]
+    )
+    rows.append(
+        [InlineKeyboardButton(text=i18n.t("checkout.cancel"), callback_data=CALLBACK_CANCEL)]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def payment_keyboard(i18n: LocalizationService) -> InlineKeyboardMarkup:

@@ -461,7 +461,7 @@ async def change_order_status(
         return
 
     try:
-        order = await admin.set_order_status(order, new_status)
+        change = await admin.order_admin.change_order_status(order, new_status)
     except InvalidStatusTransitionError:
         # Stale keyboard or crafted callback: refuse and re-render the truth.
         await callback.answer(
@@ -478,8 +478,10 @@ async def change_order_status(
     # that is not durable, and a Telegram failure must not undo it.
     await session.commit()
 
-    order = await admin.get_order(order.id) or order
-    if order.user is not None:
+    order = await admin.get_order(change.order.id) or change.order
+    # Two admins tapping at once, or one update delivered twice: only the
+    # request that actually moved the order tells anyone about it.
+    if change.changed and order.user is not None:
         await CustomerOrderNotificationService(bot).notify_status_change(order, order.user)
 
     await callback.answer(
@@ -499,7 +501,7 @@ async def change_order_status(
             page=page,
             edit=True,
         )
-    if order.status == OrderStatus.COMPLETED:
+    if change.changed and order.status == OrderStatus.COMPLETED:
         # Last, after the commit: tell both sides of a referral this completion
         # paid out, if it paid one. Read-only, and it swallows its own failures.
         await ReferralNotificationService(session, bot, settings=settings).rewards_paid(order.id)

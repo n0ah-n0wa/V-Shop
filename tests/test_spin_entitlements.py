@@ -232,10 +232,13 @@ async def test_every_bot_start_tops_up_customers_without_a_welcome_spin(
         await session.commit()
         user_ids = [user.id for user in missed] + [spent.id]
 
-    first = await lifecycle.grant_missing_welcome_spins(configured())
-    restart = await lifecycle.grant_missing_welcome_spins(configured())
+    first = await lifecycle.activate_loyalty(configured())
+    restart = await lifecycle.activate_loyalty(configured())
 
-    assert (first, restart) == (3, 0), "a restart grants nothing"
+    assert first is not None and restart is not None
+    assert (first.welcome_spins_granted, restart.welcome_spins_granted) == (3, 0), (
+        "a restart grants nothing"
+    )
     async with bot_sessions() as session:
         for user_id in user_ids:
             assert len(await grants(session, reason=INITIAL, user_id=user_id)) == 1
@@ -248,12 +251,14 @@ async def test_start_and_the_start_up_top_up_never_add_up_to_two(
     async with bot_sessions() as session:
         await send_start(session, 9530)
         await session.commit()
-    assert await lifecycle.grant_missing_welcome_spins(configured()) == 0
+    after_start = await lifecycle.activate_loyalty(configured())
+    assert after_start is not None and after_start.welcome_spins_granted == 0
 
     async with bot_sessions() as session:
         await make_user(session, telegram_id=9531)
         await session.commit()
-    assert await lifecycle.grant_missing_welcome_spins(configured()) == 1
+    missed = await lifecycle.activate_loyalty(configured())
+    assert missed is not None and missed.welcome_spins_granted == 1
 
     async with bot_sessions() as session:
         await send_start(session, 9531)
@@ -267,13 +272,12 @@ async def test_the_top_up_runs_at_every_bot_start(monkeypatch: pytest.MonkeyPatc
     async def nothing(*_: Any, **__: Any) -> None:
         return None
 
-    async def top_up(settings: Settings) -> int:
+    async def top_up(settings: Settings) -> None:
         ran.append(settings)
-        return 0
 
     for name in ("init_db", "check_db_connection", "log_database_identity"):
         monkeypatch.setattr(lifecycle, name, nothing)
-    monkeypatch.setattr(lifecycle, "grant_missing_welcome_spins", top_up)
+    monkeypatch.setattr(lifecycle, "activate_loyalty", top_up)
     bot = SimpleNamespace(
         delete_webhook=nothing,
         get_me=lambda: _me(),
@@ -298,7 +302,7 @@ async def test_a_failed_top_up_never_stops_the_bot(
     monkeypatch.setattr(lifecycle, "get_session_factory", unavailable)
 
     with caplog.at_level(logging.ERROR, logger="app.lifecycle"):
-        assert await lifecycle.grant_missing_welcome_spins(configured()) is None
+        assert await lifecycle.activate_loyalty(configured()) is None
     assert "welcome spins" in caplog.text
 
 
@@ -582,6 +586,7 @@ def test_an_unusable_spin_policy_is_refused(fields: dict[str, int]) -> None:
 
 
 def test_welcome_spins_have_exactly_two_entry_points() -> None:
-    """/start for the customer at hand; the start-up top-up for everyone missed."""
+    """/start for the customer at hand; the start-up activation for everyone missed."""
     assert callers_of(".grant_welcome_spin(") == ["app/handlers/user/start.py"]
-    assert callers_of(".grant_missing_welcome_spins(") == ["app/lifecycle.py"]
+    assert callers_of(".grant_missing_welcome_spins(") == ["app/services/loyalty_activation.py"]
+    assert callers_of(".activate_everyone(") == ["app/lifecycle.py"]

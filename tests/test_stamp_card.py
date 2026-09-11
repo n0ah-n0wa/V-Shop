@@ -538,7 +538,8 @@ def test_order_completion_gets_the_configured_stamp_rules() -> None:
                 continue
             calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
             if not any(
-                isinstance(call.func, ast.Attribute) and call.func.attr == "set_order_status"
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr in {"set_order_status", "change_order_status"}
                 for call in calls
             ):
                 continue

@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.filters.admin import IsAdmin
 from app.filters.localized_text import LocalizedText
-from app.handlers import setup_routers
 from app.handlers.admin.statistics import _render, refresh_statistics
 from app.keyboards.admin import admin_menu_keyboard
 from app.keyboards.admin_statistics import CALLBACK_STATS_REFRESH, statistics_keyboard
@@ -44,10 +43,10 @@ from app.utils.statistics_display import (
     format_statistics,
     shorten,
 )
+from tests.production_bot import ADMIN_ID, mount, production_router
 from tests.shop_dataset import NOW, Shop
 
 LANGUAGES = ("en", "ru", "de", "uk")
-ADMIN_ID = 452536082
 CUSTOMER_ID = 7000001
 TELEGRAM_MESSAGE_LIMIT = 4096
 
@@ -133,18 +132,6 @@ class _StubSession:
         return await handler(event, data)
 
 
-@functools.cache
-def production_router() -> Router:
-    """
-    The real root router, built once.
-
-    Handler modules create their routers at import time, and aiogram forbids
-    attaching one Router to two parents — so the whole tree can only be composed
-    once per process. Every test here shares this one.
-    """
-    return setup_routers(settings_for(ADMIN_ID))
-
-
 def routers_under(name: str) -> set[str]:
     """Every router name in the subtree rooted at ``name``."""
 
@@ -174,7 +161,7 @@ def _harness() -> tuple[Dispatcher, _StubSession]:
     dispatcher["settings"] = settings_for(ADMIN_ID)
     dispatcher.update.outer_middleware(PrivateChatMiddleware())
     dispatcher.update.outer_middleware(stub)
-    dispatcher.include_router(production_router())
+    mount(dispatcher)
     return dispatcher, stub
 
 
@@ -189,6 +176,7 @@ async def _feed(
     production objects. ``state`` puts the admin mid-wizard first.
     """
     dispatcher, stub = _harness()
+    mount(dispatcher)  # another module's dispatcher may hold the shared tree
     stub.session = session
 
     bot = _RecordingBot()

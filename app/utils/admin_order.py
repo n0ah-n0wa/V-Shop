@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from html import escape
 
+from app.models.enums import RewardType
 from app.models.order import Order
 from app.services.localization import LocalizationService
 from app.utils.html import e
 from app.utils.labels import city_label, delivery_label, payment_label
 from app.utils.order_status import status_label
 from app.utils.product_display import localized_product_name
+from app.utils.reward_display import order_reward, redeemed_product_name
 from app.utils.timefmt import format_timestamp
 
 
@@ -40,6 +42,9 @@ def format_admin_order_card(order: Order, i18n: LocalizationService) -> str:
             )
         )
     items_block = "\n".join(item_lines) if item_lines else "—"
+    reward_line = _reward_line(order, i18n)
+    if reward_line is not None:
+        items_block = f"{items_block}\n{reward_line}"
 
     return i18n.t(
         "admin.order_card",
@@ -57,4 +62,17 @@ def format_admin_order_card(order: Order, i18n: LocalizationService) -> str:
         items=items_block,
         total=order.total_price,
         created=format_timestamp(order.created_at),
+    )
+
+
+def _reward_line(order: Order, i18n: LocalizationService) -> str | None:
+    """The reward the order redeemed — what it was, and what it took off the total."""
+    reward = order_reward(order)
+    if reward is None or reward.discount_amount is None:
+        return None
+    if reward.kind == RewardType.FREE_BOTTLE:
+        name = escape(redeemed_product_name(order, reward, i18n.language))
+        return i18n.t("admin.order_reward_free_bottle", name=name, amount=reward.discount_amount)
+    return i18n.t(
+        "admin.order_reward_discount", percent=reward.value, amount=reward.discount_amount
     )

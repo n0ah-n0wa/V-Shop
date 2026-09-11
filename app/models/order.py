@@ -25,6 +25,7 @@ from app.models.types import enum_values
 
 if TYPE_CHECKING:
     from app.models.product import Product
+    from app.models.reward import UserReward
     from app.models.user import User
 
 
@@ -90,6 +91,10 @@ class Order(Base, TimestampMixin):
         back_populates="order",
         cascade="all, delete-orphan",
     )
+    # The reward redeemed on this order, if any (user_rewards.order_id is unique).
+    # Read-only here — only RewardService binds a reward to an order — and loaded
+    # with every order, so staff screens show it without another query.
+    reward: Mapped[UserReward | None] = relationship(viewonly=True, lazy="selectin")
 
     def __repr__(self) -> str:
         return f"<Order id={self.id} status={self.status} total={self.total_price}>"

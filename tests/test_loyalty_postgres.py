@@ -43,7 +43,7 @@ from app.models.enums import (
     RoulettePrizeType,
     SpinGrantReason,
 )
-from app.models.loyalty import LoyaltyTransaction
+from app.models.loyalty import LoyaltyAccount, LoyaltyTransaction
 from app.models.order import Order
 from app.models.referral import Referral
 from app.models.reward import UserReward
@@ -57,6 +57,7 @@ from app.services.loyalty import (
     LoyaltyService,
     StaleCardError,
 )
+from app.services.loyalty_activation import LoyaltyActivationService
 from app.services.order import EmptyCartError, OrderService
 from app.services.referral import ReferralAttribution, ReferralService, referral_payload
 from app.services.referral_program import ReferralOutcome, ReferralProgramService
@@ -636,6 +637,40 @@ async def test_the_start_up_top_up_racing_starts_grants_one_welcome_spin_each(
             .group_by(RouletteSpinGrant.user_id)
         )
         assert {user_id: count for user_id, count in per_user.all()} == dict.fromkeys(user_ids, 1)
+
+
+async def test_racing_starts_and_registrations_open_one_account_each(pg: Factory) -> None:
+    """Two instances starting while newcomers register: one account per customer, no errors."""
+
+    async def build(session: AsyncSession) -> list[int]:
+        return [(await make_user(session, telegram_id=9250 + i)).id for i in range(RACERS)]
+
+    existing: list[int] = await seed(pg, build)
+
+    async def start_or_register(session: AsyncSession, index: int) -> object:
+        if index % 2 == 0:
+            return await LoyaltyActivationService(session).activate_everyone()  # a bot start
+        return await UserService(session).ensure_user(  # a newcomer's first update
+            TgUser(id=9270 + index, is_bot=False, first_name="New")
+        )
+
+    results = await race(pg, start_or_register)
+
+    assert errors(results) == []
+    async with pg() as session:
+        users = set((await session.scalars(select(User.id))).all())
+        accounts = await session.execute(
+            select(LoyaltyAccount.user_id, func.count()).group_by(LoyaltyAccount.user_id)
+        )
+        assert {user_id: n for user_id, n in accounts.all()} == dict.fromkeys(users, 1)
+        granted = await session.execute(
+            select(RouletteSpinGrant.user_id, func.count())
+            .where(RouletteSpinGrant.reason == SpinGrantReason.INITIAL_PROMO)
+            .group_by(RouletteSpinGrant.user_id)
+        )
+        welcome = {user_id: n for user_id, n in granted.all()}
+        assert set(welcome.values()) <= {1}
+        assert set(existing) <= set(welcome)
 
 
 # ------------------------------------------------------------ the prize engine

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from typing import Any, cast
+
+from sqlalchemy import Executable, exists, select
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.loyalty import LoyaltyAccount
+from app.models.user import User
 from app.repositories.base import BaseRepository
 
 
@@ -44,6 +49,42 @@ class LoyaltyAccountRepository(BaseRepository[LoyaltyAccount]):
             if account is None:
                 raise
             return account, False
+
+    async def insert_missing_accounts(self) -> int:
+        """
+        Open an empty account for every user who has none, in one statement.
+
+        Zero stamps, zero purchases, no referral code — the row lazy creation
+        makes. ``ON CONFLICT DO NOTHING`` absorbs an account another transaction
+        opens at the same moment (``user_id`` is unique), so the statement never
+        fails, never duplicates and never touches an existing account. Returns
+        the rows inserted.
+        """
+        missing = (
+            select(User.id)
+            .where(~exists().where(LoyaltyAccount.user_id == User.id))
+            # In one fixed order: two backfills racing (two instances starting)
+            # then queue behind each other's rows instead of deadlocking.
+            .order_by(User.id)
+        )
+        dialect = self.session.get_bind().dialect.name
+        statement: Executable
+        if dialect == "postgresql":
+            statement = (
+                postgresql.insert(LoyaltyAccount)
+                .from_select(["user_id"], missing)
+                .on_conflict_do_nothing()
+            )
+        elif dialect == "sqlite":
+            statement = (
+                sqlite.insert(LoyaltyAccount)
+                .from_select(["user_id"], missing)
+                .on_conflict_do_nothing()
+            )
+        else:  # pragma: no cover - production is PostgreSQL, the suite SQLite
+            raise NotImplementedError(f"No idempotent bulk account backfill for {dialect}")
+        result = cast(CursorResult[Any], await self.session.execute(statement))
+        return max(result.rowcount, 0)
 
     async def get_by_referral_code(self, code: str) -> LoyaltyAccount | None:
         result = await self.session.scalars(

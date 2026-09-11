@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.enums import CityChoice, LanguageCode
 from app.models.user import User
 from app.repositories.cart import CartRepository
+from app.repositories.loyalty_account import LoyaltyAccountRepository
 from app.repositories.user import UserRepository
 
 # Avoid rewriting last_seen on every update within a short window.
@@ -21,9 +22,16 @@ class UserService:
         self.session = session
         self.users = UserRepository(session)
         self.carts = CartRepository(session)
+        self.loyalty_accounts = LoyaltyAccountRepository(session)
 
     async def ensure_user(self, tg_user: TgUser) -> User:
-        """Get or create the DB user and refresh profile fields from Telegram."""
+        """
+        Get or create the DB user and refresh profile fields from Telegram.
+
+        A new user gets their cart and their (empty) loyalty account at once, so
+        every customer is in the loyalty programme from their first contact —
+        whichever handler saw them first. Both are get-or-create, safe to repeat.
+        """
         user, created = await self.users.get_or_create_by_telegram(
             tg_user.id,
             username=tg_user.username,
@@ -31,6 +39,7 @@ class UserService:
         )
         if created:
             await self.carts.get_or_create_for_user(user.id)
+            await self.loyalty_accounts.get_or_create_for_user(user.id)
             return user
 
         profile_changed = user.username != tg_user.username or user.first_name != tg_user.first_name

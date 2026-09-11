@@ -10,4 +10,5 @@ class CheckoutStates(StatesGroup):
     preferred_time = State()
     contact = State()
     payment_method = State()
+    reward = State()  # only for customers holding a reward that fits the cart
     confirmation = State()

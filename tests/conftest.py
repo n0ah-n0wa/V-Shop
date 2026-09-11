@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from decimal import Decimal
 
 import pytest
@@ -49,6 +49,32 @@ def _isolate_settings_from_the_environment() -> Iterator[None]:
     finally:
         Settings.model_config["env_file"] = original
         os.environ.update(saved)
+
+
+@pytest.fixture
+def lands(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
+    """
+    The roulette screen's next draws land on the prize named — by prize code.
+
+    Only the ticket source is replaced: the engine still validates, spends the
+    spin and books the prize, as the roulette engine's own tests do.
+    """
+    from app.handlers.user import roulette as roulette_screen
+    from app.services.roulette_engine import RouletteEngine, RoulettePolicy
+
+    def land(code: str) -> None:
+        def engine(session: AsyncSession, settings: Settings) -> RouletteEngine:
+            policy = RoulettePolicy.from_settings(settings)
+            ticket = 0
+            for entry in policy.table.entries:
+                if entry.prize.code == code:
+                    break
+                ticket += entry.weight
+            return RouletteEngine(session, policy, randbelow=lambda total: ticket)
+
+        monkeypatch.setattr(roulette_screen, "_engine", engine)
+
+    return land
 
 
 @pytest_asyncio.fixture

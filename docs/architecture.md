@@ -196,7 +196,7 @@ a unique constraint per source keeps each to a single grant:
 
 | Source | Granted by | Keyed on |
 |---|---|---|
-| Welcome spin | `/start`, and a top-up of every customer without one at each bot start (`grant_missing_welcome_spins` in `app/lifecycle.py`) | partial unique index: one `initial_promo` grant per user |
+| Welcome spin | `/start`, and a backfill of every customer without one at each bot start (`LoyaltyActivationService.activate_everyone`, run by `activate_loyalty` in `app/lifecycle.py`, which also opens missing loyalty accounts) | partial unique index: one `initial_promo` grant per user |
 | Every Nth purchase | `AdminOrderService.set_order_status` on `Completed`, right after the stamp award, same transaction | `order_id` |
 | Referral | `grant_for_referral`, to the referrer, once the referral qualifies | `(referral_id, user_id)` |
 
@@ -283,15 +283,16 @@ root
 │   ├── checkout
 │   ├── information
 │   └── /admin access-denied for non-admins
-└── admin router  (IsAdmin filter + AdminOnlyMiddleware)
-    ├── wizard guard (block menu jumps mid-FSM)
-    ├── products (add wizard)
-    ├── product_manage (list / edit / delete)
-    ├── categories
-    ├── orders
-    ├── broadcast
-    ├── settings
-    └── panel (/admin menu)
+├── admin router  (IsAdmin filter + AdminOnlyMiddleware)
+│   ├── wizard guard (block menu jumps mid-FSM)
+│   ├── products (add wizard)
+│   ├── product_manage (list / edit / delete)
+│   ├── categories
+│   ├── orders
+│   ├── broadcast
+│   ├── settings
+│   └── panel (/admin menu)
+└── fallback  (answers button taps nothing above handled; admin buttons excluded)
 ```
 
 ## Main user flows
@@ -329,8 +330,8 @@ decides under the account lock, and the claim is committed — inside a
 per-customer `keyed_lock` — before the customer is told. A double tap is
 answered "already claimed" (`AlreadyClaimedError`), a card that changed
 meanwhile is redrawn (`StaleCardError`), and a malformed payload is refused
-before the database is touched. The checkout screens do not offer a saved bottle
-yet; `place_order_from_cart(reward_id=…)` supports it at the service level.
+before the database is touched. A claimed bottle is spent at checkout — see
+"Rewards at checkout" below.
 
 ### Lucky Roulette
 
@@ -355,7 +356,32 @@ finds the spin played and is shown its result; an id that is not the
 customer's spends nothing and the roulette is redrawn; a malformed payload never
 reaches the database; a database failure is rolled back and the customer told
 nothing was lost — the same button retries safely. Won discounts and free
-bottles are saved rewards; the checkout screens do not offer them yet.
+bottles are saved rewards, spent at checkout.
+
+### Rewards at checkout
+
+The loyalty programme hangs off the two order events that already exist —
+placing an order and completing it — and no second pipeline:
+
+| Event | What happens, in the same transaction |
+|---|---|
+| Checkout confirmed (`OrderService.place_order_from_cart`) | the chosen reward is re-planned under the account and reward locks, the order is written with a €0 unit (free bottle) or a lowered total (discount), and the reward is bound to it (`RewardService.redeem`) |
+| Order completed (`AdminOrderService.set_order_status`) | stamps on the charged total (`StampCardService.award_for_order`), the every-Nth-purchase spin (`SpinEntitlementService.grant_for_completed_order`), a first order's referral payout (`ReferralProgramService.settle_for_completed_order`) |
+
+After the payment step, a customer holding a reward that fits the cart gets one
+more step: one button per reward with what it takes off this cart
+(`OrderService.reward_options` → `RewardService.options`, the same planning
+`plan` runs under lock), ➡️ Continue without a reward, and ❌ Cancel. Customers
+without one go straight to the summary, exactly as before. The callback carries
+only the reward id (`checkout:reward:<id>`), checked against the options afresh.
+The summary shows subtotal, reward and total from `OrderService.quote`; if the
+reward was used meanwhile or the cart no longer fits it, confirming rolls back,
+says so, and shows the order without it. One reward per order; the rest stay
+saved; a reward on an order later cancelled stays used (owner decision).
+
+The redemption is on the record for staff: `Order.reward` (read-only, loaded
+with the order) adds a "Reward used" line to the manager's new-order alert and
+the admin order card.
 
 ### Invite a Friend
 

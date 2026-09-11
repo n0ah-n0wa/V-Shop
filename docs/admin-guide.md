@@ -132,7 +132,12 @@ Create at least one category before adding products.
 
 1. Open **Orders**
 2. View **New** or **Completed** lists (paginated)
-3. Open an order for the full card (customer, items, totals, contacts)
+3. Open an order for the full card (customer, items, totals, contacts). An order
+   paid partly with a loyalty reward shows a **Reward used** line under the items:
+   a free bottle is the item listed at 0.00, a discount is already off the total —
+   charge the total shown
+4. Completing an order books the customer's stamps, any roulette spin it earns and
+   a first order's referral bonus automatically — there is nothing to do by hand
 4. Change status: **New** → **Accepted** → **Completed**, or **Cancelled**
 5. **Search** by order ID, customer name, or phone
 

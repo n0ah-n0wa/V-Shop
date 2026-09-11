@@ -167,10 +167,10 @@ their statuses, historical totals, and the rendered statistics dashboard. Its
   before their referral qualified. The bot never
   produces any of these, so every value must be `0`; anything else means rows
   were changed outside it, and the ledger is the record to trust.
-- `coverage` — users without a loyalty account or welcome spin. The bot grants
-  the welcome spin at `/start` and tops it up for every customer still without
-  one each time it starts, so after a start that count is `0`. Accounts are
-  created on first use, so users without one are normal.
+- `coverage` — users without a loyalty account or welcome spin. Accounts are
+  opened when a user first registers, the welcome spin at `/start`, and every
+  bot start backfills anyone still missing either, so after a start both counts
+  are `0` (the welcome-spin count only while `ROULETTE_INITIAL_FREE_SPIN` is on).
 
 ## Safe operations
 
@@ -487,12 +487,28 @@ On startup the app:
 1. Configures logging
 2. Initializes the DB engine and checks `SELECT 1`
 3. Logs the database identity (URL, `system_identifier`, row counts) — read-only
-4. Creates the bot/dispatcher
-5. Calls Telegram `getMe` (startup check)
-6. Begins long polling
+4. Brings existing customers into the loyalty programme: opens any missing
+   loyalty account and grants any missing welcome spin
+5. Creates the bot/dispatcher
+6. Calls Telegram `getMe` (startup check)
+7. Begins long polling
 
 Step 3 never writes and never blocks startup: if the probe fails it is logged at
 `DEBUG` and the bot continues.
+
+Step 4 (`activate_loyalty` → `LoyaltyActivationService.activate_everyone`) is
+the loyalty backfill for existing users, and is safe on every start, restart and
+redeploy: each row type is one `INSERT … SELECT … ON CONFLICT DO NOTHING` over
+the users missing it, behind a unique constraint (`loyalty_accounts.user_id`;
+one `initial_promo` grant per user), so a second run adds nothing and two
+instances starting together cannot duplicate. It never updates an existing row —
+balances, referral codes and welcome spins already spent stay as they are — and
+never reads or writes orders or the catalog. Orders placed before the loyalty
+launch keep `loyalty_eligible = false` (migration `8e4c1a7b2d95`) and never earn
+purchase stamps. It logs `Loyalty activation: accounts_opened=… welcome_spins_granted=…`;
+a failure is logged and never blocks startup. The loyalty migration ran the same
+backfill once at launch; this step catches up anyone registered or left behind
+since.
 
 If DB or token checks fail, the process exits non-zero (Compose will restart if `restart: unless-stopped`).
 

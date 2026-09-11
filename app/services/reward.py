@@ -18,6 +18,10 @@ Redemption happens at checkout, inside the transaction that creates the order
 
 If any step fails the whole checkout rolls back: the reward stays available and
 the order never exists.
+
+What checkout *offers* comes from :meth:`RewardService.options`, which runs the
+same planning without locking or writing — so an offer is exactly what
+confirming does, and confirming re-checks it under lock.
 """
 
 from __future__ import annotations
@@ -154,6 +158,36 @@ def _discount_plan(reward: UserReward, lines: Sequence[Line]) -> DiscountPlan:
     return DiscountPlan(reward_id=reward.id, percent=reward.value, discount=discount)
 
 
+def _plan(reward: UserReward, lines: Sequence[Line]) -> RewardPlan:
+    """What ``reward`` would do to ``lines`` — one decision, for offers and for orders."""
+    if reward.kind == RewardType.DISCOUNT_PERCENT:
+        return _discount_plan(reward, lines)
+    return _free_bottle_plan(reward, lines)
+
+
+def _plan_or_none(reward: UserReward, lines: Sequence[Line]) -> RewardPlan | None:
+    try:
+        return _plan(reward, lines)
+    except RewardNotApplicableError:
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class RewardOption:
+    """A reward the customer could use on the order at hand, and what it would do."""
+
+    reward: UserReward
+    plan: RewardPlan
+
+    @property
+    def reward_id(self) -> int:
+        return self.reward.id
+
+    @property
+    def saving(self) -> Decimal:
+        return self.plan.discount
+
+
 class RewardService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -168,6 +202,22 @@ class RewardService:
 
     async def get_for_user(self, reward_id: int, user_id: int) -> UserReward | None:
         return await self.rewards.get_for_user(reward_id, user_id)
+
+    async def options(self, user_id: int, *, lines: Sequence[Line]) -> list[RewardOption]:
+        """
+        Read-only: the customer's available rewards that can do something for ``lines``.
+
+        The decision :meth:`plan` makes when the order is placed, made without
+        locking or writing — so what checkout offers is what placing the order
+        does, and :meth:`plan` re-checks it under lock. Biggest saving first,
+        then the oldest reward.
+        """
+        options = [
+            RewardOption(reward, plan)
+            for reward in await self.rewards.list_available_for_user(user_id)
+            if (plan := _plan_or_none(reward, lines)) is not None
+        ]
+        return sorted(options, key=lambda option: (-option.saving, option.reward_id))
 
     async def plan(
         self,
@@ -187,9 +237,7 @@ class RewardService:
         product within the cap, or an order too small for a whole cent off.
         """
         reward = await self._lock_available(reward_id, user_id)
-        if reward.kind == RewardType.DISCOUNT_PERCENT:
-            return _discount_plan(reward, lines)
-        return _free_bottle_plan(reward, lines)
+        return _plan(reward, lines)
 
     async def plan_free_bottle(
         self,

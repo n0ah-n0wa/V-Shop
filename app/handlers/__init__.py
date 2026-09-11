@@ -7,6 +7,7 @@ import logging
 from aiogram import Router
 
 from app.config import Settings, get_settings
+from app.handlers import fallback
 from app.handlers.admin import get_admin_router
 from app.handlers.user import get_user_router
 
@@ -19,6 +20,8 @@ def setup_routers(settings: Settings | None = None) -> Router:
     root = Router(name="root")
     root.include_router(get_user_router())
     root.include_router(get_admin_router(cfg))
+    # Last: answers button taps nothing above handled (stale keyboards).
+    root.include_router(fallback.router)
     logger.debug(
         "Routers mounted: %s",
         [router.name for router in root.sub_routers],

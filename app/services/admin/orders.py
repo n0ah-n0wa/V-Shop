@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import OrderStatus
@@ -13,6 +15,14 @@ from app.services.referral_program import ReferralPolicy, ReferralProgramService
 from app.services.spin_entitlement import SpinEntitlementService, SpinPolicy
 from app.services.stamp_card import StampCardPolicy, StampCardService
 from app.utils.order_status import allowed_transitions, can_transition
+
+
+@dataclass(frozen=True, slots=True)
+class StatusChange:
+    """The order after a status request, and whether this request is what moved it."""
+
+    order: Order
+    changed: bool
 
 
 class AdminOrderService:
@@ -78,12 +88,22 @@ class AdminOrderService:
         the same transaction — the status and everything it earned become
         durable together or not at all.
         """
+        return (await self.change_order_status(order, status)).order
+
+    async def change_order_status(self, order: Order, status: OrderStatus) -> StatusChange:
+        """
+        :meth:`set_order_status`, reporting whether this request moved the order.
+
+        Two admins tapping at once, or one update delivered twice, both reach
+        here; the row lock lets one move the order and hands the other the order
+        already in ``status`` — ``changed=False``, so it tells no one again.
+        """
         await self.session.flush()
         current = await self.orders.get_for_update(order.id)
         if current is None:
             raise LookupError(f"Order {order.id} does not exist")
         if current.status == status:
-            return current
+            return StatusChange(current, changed=False)
         if not can_transition(current.status, status):
             raise InvalidStatusTransitionError(current.status, status)
         updated = await self.orders.update_status(current, status)
@@ -93,7 +113,7 @@ class AdminOrderService:
             await self.spins.grant_for_completed_order(updated.id)
             # A brand-new customer's first paid order pays their referral out.
             await self.referral_program.settle_for_completed_order(updated.id)
-        return updated
+        return StatusChange(updated, changed=True)
 
     @staticmethod
     def allowed_next_statuses(order: Order) -> tuple[OrderStatus, ...]:

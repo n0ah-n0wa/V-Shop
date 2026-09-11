@@ -31,13 +31,27 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
 from app.config import Settings
+from app.models.enums import RewardType
 from app.models.order import Order
 from app.models.user import User
 from app.utils.labels import city_label_en, delivery_label_en, payment_label_en
 from app.utils.product_display import localized_product_name
+from app.utils.reward_display import order_reward, redeemed_product_name
 from app.utils.timefmt import format_timestamp
 
 logger = logging.getLogger(__name__)
+
+
+def _reward_line(order: Order) -> str:
+    """The reward the order redeemed, so staff charge what the customer was promised."""
+    reward = order_reward(order)
+    if reward is None or reward.discount_amount is None:
+        return ""
+    if reward.kind == RewardType.FREE_BOTTLE:
+        what = f"free bottle — {escape(redeemed_product_name(order, reward, 'en'))}"
+    else:
+        what = f"{reward.value}% discount"
+    return f"🎁 <b>Reward used:</b> {what} (−<code>{reward.discount_amount}</code>)\n"
 
 
 class OrderNotificationService:
@@ -110,6 +124,7 @@ class OrderNotificationService:
             f"🛍 <b>Ordered products</b>\n"
             f"{items_block}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{_reward_line(order)}"
             f"💰 <b>Total:</b> <code>{order.total_price}</code>\n"
             f"📌 <b>Status:</b> {escape(str(order.status))}\n"
             f"🕐 <i>{escape(format_timestamp(order.created_at, with_seconds=True))}</i>"

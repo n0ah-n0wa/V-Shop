@@ -1,4 +1,10 @@
-"""Checkout conversation (FSM): name → delivery → address → time → phone → confirm."""
+"""Checkout conversation (FSM): name → delivery → address → time → phone → payment →
+reward (only for customers holding one that fits the cart) → confirm.
+
+Every amount comes from :class:`~app.services.order.OrderService`: what a reward
+would take off (``reward_options`` / ``quote``) is decided by the same planning
+that places the order, which re-checks the chosen reward under lock. The
+reward step's callback carries only a reward id."""
 
 from __future__ import annotations
 
@@ -18,19 +24,24 @@ from app.keyboards.checkout import (
     CALLBACK_CONFIRM,
     CALLBACK_DELIVERY_PREFIX,
     CALLBACK_PAYMENT_PREFIX,
+    CALLBACK_REWARD_NONE,
+    CALLBACK_REWARD_PREFIX,
     checkout_cancel_keyboard,
     confirmation_keyboard,
     contact_keyboard,
     delivery_keyboard,
     payment_keyboard,
+    reward_keyboard,
 )
 from app.keyboards.reply import main_menu_keyboard, remove_keyboard
 from app.models.enums import CityChoice, DeliveryType, PaymentMethod
 from app.models.user import User
 from app.services.cart import CartService, CartView
 from app.services.localization import LocalizationService
+from app.services.loyalty import LoyaltyError
 from app.services.notification import OrderNotificationService
 from app.services.order import (
+    CheckoutQuote,
     EmptyCartError,
     InactiveProductError,
     InvalidDeliveryError,
@@ -42,8 +53,9 @@ from app.states.checkout import CheckoutStates
 from app.utils.concurrency import keyed_lock
 from app.utils.html import e
 from app.utils.labels import city_label, delivery_label, payment_label
+from app.utils.reward_display import reward_option_label, reward_summary_line
 from app.utils.telegram_ui import as_message, clear_inline_markup
-from app.utils.validators import nonempty, normalize_phone
+from app.utils.validators import nonempty, normalize_phone, parse_positive_int
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +68,7 @@ _CHECKOUT_STATES = (
     CheckoutStates.preferred_time,
     CheckoutStates.contact,
     CheckoutStates.payment_method,
+    CheckoutStates.reward,
     CheckoutStates.confirmation,
 )
 
@@ -72,7 +85,12 @@ def build_checkout_summary(
     data: dict[str, Any],
     user: User,
     view: CartView,
+    quote: CheckoutQuote | None = None,
 ) -> str:
+    """
+    The order summary; with a ``quote`` carrying a reward, what it takes off —
+    as the order service computed it, never here.
+    """
     lines = [
         i18n.t("checkout.summary_title"),
         "",
@@ -105,7 +123,13 @@ def build_checkout_summary(
             )
         )
     lines.append("")
-    lines.append(i18n.t("checkout.summary_total", total=view.total))
+    if quote is not None and quote.reward is not None:
+        names = {line.product_id: line.name for line in view.lines}
+        lines.append(i18n.t("checkout.summary_subtotal", subtotal=quote.subtotal))
+        lines.append(reward_summary_line(quote.reward, i18n, names))
+        lines.append(i18n.t("checkout.summary_total", total=quote.total))
+    else:
+        lines.append(i18n.t("checkout.summary_total", total=view.total))
     return "\n".join(lines)
 
 
@@ -457,7 +481,7 @@ async def checkout_payment(
     await state.update_data(payment_method=payment.value)
     await callback.answer()
     await clear_inline_markup(message)
-    await _show_confirmation(message, state, session, user)
+    await _offer_rewards(message, state, session, user)
 
 
 @router.message(StateFilter(CheckoutStates.payment_method))
@@ -466,6 +490,47 @@ async def checkout_payment_invalid(
     i18n: LocalizationService,
 ) -> None:
     await message.answer(i18n.t("checkout.invalid_payment"))
+
+
+@router.callback_query(
+    StateFilter(CheckoutStates.reward),
+    F.data.startswith(CALLBACK_REWARD_PREFIX),
+)
+async def checkout_reward(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    i18n: LocalizationService,
+) -> None:
+    """The customer picks one reward for this order, or none."""
+    message = as_message(callback)
+    if callback.data is None or message is None or callback.from_user is None:
+        await callback.answer()
+        return
+
+    user = await UserService(session).ensure_user(callback.from_user)
+    localized = LocalizationService.from_user(user)
+    reward_id: int | None = None
+    if callback.data != CALLBACK_REWARD_NONE:
+        reward_id = parse_positive_int(callback.data.removeprefix(CALLBACK_REWARD_PREFIX))
+        # Only a reward offered to this customer for this cart, checked afresh:
+        # a stale button or a crafted id is refused, and the list offered again.
+        offered = await OrderService(session).reward_options(user)
+        if reward_id not in {option.reward_id for option in offered}:
+            await callback.answer(localized.t("checkout.reward_unavailable"), show_alert=True)
+            await clear_inline_markup(message)
+            await _offer_rewards(message, state, session, user)
+            return
+
+    await state.update_data(reward_id=reward_id)
+    await callback.answer()
+    await clear_inline_markup(message)
+    await _show_confirmation(message, state, session, user)
+
+
+@router.message(StateFilter(CheckoutStates.reward))
+async def checkout_reward_invalid(message: Message, i18n: LocalizationService) -> None:
+    await message.answer(i18n.t("checkout.use_buttons"))
 
 
 @router.message(StateFilter(CheckoutStates.confirmation))
@@ -499,6 +564,40 @@ async def _ask_payment(
     )
 
 
+async def _offer_rewards(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    user: User,
+) -> None:
+    """
+    Offer the customer's rewards that fit this cart — or go straight to the summary.
+
+    Customers without one never see this step. One reward per order; the rest
+    stay saved. What each would take off is the order service's figure.
+    """
+    localized = LocalizationService.from_user(user)
+    options = await OrderService(session).reward_options(user)
+    if not options:
+        await state.update_data(reward_id=None)
+        await _show_confirmation(message, state, session, user)
+        return
+
+    view = await CartService(session).get_view(user.id, language=localized.language)
+    names = {line.product_id: line.name for line in view.lines} if view is not None else {}
+    await state.set_state(CheckoutStates.reward)
+    await message.answer(
+        localized.t("checkout.ask_reward"),
+        reply_markup=reward_keyboard(
+            localized,
+            [
+                (option.reward_id, reward_option_label(option, localized, names))
+                for option in options
+            ],
+        ),
+    )
+
+
 async def _show_confirmation(
     message: Message,
     state: FSMContext,
@@ -525,9 +624,17 @@ async def _show_confirmation(
         )
         return
 
+    chosen = data.get("reward_id")
+    reward_id = chosen if isinstance(chosen, int) else None
+    quote = await OrderService(session).quote(user, reward_id=reward_id)
+    if reward_id is not None and (quote is None or quote.reward is None):
+        # Used meanwhile, or the cart no longer fits it: go on without it.
+        await state.update_data(reward_id=None)
+        await message.answer(localized.t("checkout.reward_unavailable"))
+
     await state.set_state(CheckoutStates.confirmation)
     await message.answer(
-        build_checkout_summary(localized, data=data, user=user, view=view),
+        build_checkout_summary(localized, data=data, user=user, view=view, quote=quote),
         reply_markup=remove_keyboard(),
     )
     await message.answer(
@@ -556,7 +663,9 @@ async def checkout_confirm(
 
     async with keyed_lock(f"checkout:{callback.from_user.id}"):
         data = await state.get_data()
-        if data.get("submitted"):
+        # A tap that waited here while another placed the order finds checkout
+        # closed: that order is already in, which is no error.
+        if data.get("submitted") or await state.get_state() != CheckoutStates.confirmation.state:
             await callback.answer(i18n.t("checkout.already_submitted"), show_alert=True)
             return
 
@@ -607,6 +716,7 @@ async def checkout_confirm(
                 return
 
         await state.update_data(submitted=True)
+        chosen = data.get("reward_id")
 
         try:
             order = await OrderService(session).place_order_from_cart(
@@ -617,6 +727,7 @@ async def checkout_confirm(
                 preferred_time=str(data["preferred_time"]),
                 phone=phone,
                 payment_method=payment,
+                reward_id=chosen if isinstance(chosen, int) else None,
             )
         except EmptyCartError:
             await state.clear()
@@ -644,6 +755,16 @@ async def checkout_confirm(
                 localized.t("checkout.invalid_delivery"),
                 reply_markup=main_menu_keyboard(localized),
             )
+            return
+        except LoyaltyError:
+            # The chosen reward was used meanwhile or no longer fits the cart.
+            # Nothing is kept: show the order again without it, to confirm or cancel.
+            await session.rollback()
+            await state.update_data(submitted=False, reward_id=None)
+            await callback.answer(localized.t("checkout.reward_unavailable"), show_alert=True)
+            await clear_inline_markup(message)
+            user = await UserService(session).ensure_user(callback.from_user)
+            await _show_confirmation(message, state, session, user)
             return
         except Exception:
             await state.update_data(submitted=False)
