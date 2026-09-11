@@ -123,7 +123,8 @@ Three rules hold it together:
 1. **Lock the customer's account first.** Every mutation starts with
    `LoyaltyService.lock_account` — `SELECT … FOR UPDATE` on the customer's
    `loyalty_accounts` row, refreshing the ORM instance — which serialises one
-   customer's loyalty operations inside PostgreSQL.
+   customer's loyalty operations inside PostgreSQL. A spin grant, which only
+   inserts a row its unique index keys, needs no lock.
 2. **Idempotency comes from the schema.** Each earning event is tied to its
    source row (order, referral, spin, reward) by a unique constraint. Replaying
    it returns the original row with `created=False` instead of booking it twice.
@@ -140,10 +141,11 @@ Business rules — how many stamps an order earns, prize weights — are not
 decided in the ledger; callers pass the amounts in. The one rule enforced at
 this level is who qualifies: `ReferralService.qualify` accepts only the
 referred customer's Completed, paid, post-launch order. SQLite cannot prove the
-locking (it ignores `FOR UPDATE`), so `tests/test_loyalty_postgres.py` races
-real transactions on PostgreSQL when `VSHOP_TEST_POSTGRES_URL` is set, and
-`tests/test_loyalty_scenarios.py` checks on every run that each redemption path
-takes the account lock before its first write.
+locking (it ignores `FOR UPDATE`), so the PostgreSQL suites race real
+transactions when `VSHOP_TEST_POSTGRES_URL` is set (see
+[Loyalty transactions and concurrency](#loyalty-transactions-and-concurrency)),
+and `tests/test_loyalty_scenarios.py` checks on every run that each redemption
+path takes the account lock before its first write.
 
 ## Stamp card engine
 
@@ -205,8 +207,7 @@ after launch, charged more than €0), numbered among the customer's purchase
 rows; the interval in force when the order completes decides, so changing it
 never grants for past purchases. A replayed completion, a restart or a race can
 never grant twice. `SpinEntitlementService.balance` reports available and used
-spins by reason. The referral payout that will call `grant_for_referral` is not
-wired yet.
+spins by reason.
 
 ## Roulette prize engine
 
@@ -270,6 +271,82 @@ wired yet.
   completion, a second order or a race pays nothing more. `loyalty_health`
   reports any bonus booked before its referral qualified.
 
+## Loyalty transactions and concurrency
+
+Every loyalty operation below is one database transaction at PostgreSQL's
+default isolation level, READ COMMITTED. Correctness comes from row locks and
+unique constraints, not from the isolation level: every decision is made on
+rows read under a lock (`SELECT … FOR UPDATE`, the ORM instance refreshed) or
+is enforced by a constraint, and once a lock is granted each statement sees
+what its previous holder committed. REPEATABLE READ or SERIALIZABLE would turn
+those waits into serialization failures that nothing retries — don't raise the
+level without adding retries.
+
+| Operation | Transaction (committed by) | Locks, in order | Idempotency key — unique constraint | A replay or a racing duplicate | On failure |
+|---|---|---|---|---|---|
+| Purchase stamps | The admin's status change to Completed (`set_order_status`); the handler commits before any message | order row → customer's account | `loyalty_transactions.order_id` | Status already Completed: `changed = False`, nothing booked or sent | Status, stamps, spin and referral payout roll back together |
+| Nth-purchase spin | The same, right after the stamps | account (held) | `roulette_spin_grants.order_id` | Numbered from the ledger's purchase rows under the account lock, so orders completing together get distinct numbers | As above |
+| Referral stamps, both sides | The same (`settle_for_completed_order`) | referral row → referred customer's account → referrer's account | `referrals.qualifying_order_id`; `loyalty_transactions (referral_id, user_id)` | Referral already `qualified`: nothing more | As above |
+| Referral spin | The same (`grant_for_referral`) | none — the unique index decides | `roulette_spin_grants (referral_id, user_id)` | Insert-or-find in a savepoint | As above |
+| Welcome spin | `/start`, committed before any reply; the start-up backfill, one statement before polling starts | none — the unique index decides | partial unique `roulette_spin_grants (user_id)` where `reason = 'initial_promo'` | `/start`: insert-or-find in a savepoint; backfill: `ON CONFLICT DO NOTHING` in `user_id` order | `/start` rolls back and the next one grants it; a failed backfill is logged and the bot starts |
+| Referral attribution | `/start ref_<code>`, committed before any reply | referred customer's account → attribution advisory lock | `referrals.referred_user_id` | Insert-or-find in a savepoint: `ALREADY_REFERRED` | Nothing written; onboarding carries on |
+| Spending a spin | Roulette tap, inside the customer's `keyed_lock`; committed before the animation | account → grant row | `roulette_spins.grant_id` — the callback names the grant | Grant already spent: its saved result is replayed (`created = False`) | All rolled back; the grant stays available |
+| Prize: stamps | The spin's transaction | account (held) | `loyalty_transactions.spin_id` | The spin's replay | As the spin |
+| Prize: discount or free-bottle reward | The spin's transaction | account (held) | `user_rewards.spin_id` | The spin's replay | As the spin |
+| Claiming a free bottle | Stamp-card tap, inside the customer's `keyed_lock`; committed before the answer | account | the card version (its latest ledger id); `loyalty_transactions.reward_id` | The same card again: `AlreadyClaimedError`; newer activity: `StaleCardError` | Refused before any write; stamps intact |
+| Redeeming a reward at checkout | Confirm, inside the customer's `keyed_lock` and FSM `submitted`; committed before the manager alert | cart row → account → reward row | `user_rewards.order_id` (one reward per order); `available → used` under the reward's lock | A second confirm: `already_submitted`; a reward used meanwhile is refused and the summary shown again | No order; the reward stays available |
+
+**Balances cannot go negative.** The stamp balance and each ledger row's
+`balance_after` carry `CHECK (… >= 0)`; `LoyaltyService` refuses an overdraw
+before writing, and every debit runs under the account lock, so two claims never
+both see enough stamps. The spin balance is not a counter but the number of
+unspent grants: spending one sets its `consumed_at` under its row lock, so the
+balance can neither drop below zero nor spend a grant twice.
+
+**No automatic retries.** At READ COMMITTED with these locks PostgreSQL raises
+no serialization failures, and the lock order below rules out deadlocks. An
+operation that fails rolls back whole — validation runs before the first write,
+and a savepoint only absorbs an insert a concurrent transaction won — so the
+customer's next tap, Telegram redelivering the update or a restart simply runs
+it again, and its idempotency key makes that safe even when the first attempt
+did commit.
+
+**Lock order.** Every path takes its locks in this order, so no two
+transactions wait on each other in a cycle:
+
+1. the process-local `keyed_lock` for the customer (checkout, roulette, claim);
+2. the customer's cart row (placing an order);
+3. the order row (a status change);
+4. the referral row (a payout);
+5. loyalty accounts — the order's customer first; in a payout the referred
+   customer, then the referrer. Attribution refuses loops anywhere up a chain,
+   so payouts running at once always wait towards the root of their chain;
+6. the operation's own rows: the grant, the reward;
+7. the attribution advisory lock (`/start ref_<code>` only), last.
+
+Placing an order and attributing a referral both take the customer's account
+lock: an order being placed either commits before attribution asks whether the
+customer has ever ordered, or waits until the attribution is decided — a
+referral never lands on top of a first order in flight.
+
+**Telegram is never awaited under a loyalty lock.** Every handler commits before
+it talks to Telegram: `/start` after registration, the welcome spin and any
+attribution; 👥 Invite a Friend after creating the code; the roulette and the
+stamp card before answering; checkout and the admin status change before
+notifying. What runs after a commit only reads, without locks — referral news
+takes the referrer's link from `existing_invitation`, which never locks or
+creates. A slow Telegram never stalls another customer's attribution, or a
+payout waiting on the same account.
+
+`tests/test_loyalty_postgres.py` races each operation in real transactions,
+`tests/test_loyalty_journeys_postgres.py` races whole updates through the
+production dispatcher, and `tests/test_loyalty_concurrency.py` races the
+combinations — a first order against an attribution, a referral chain paying
+out at once, one customer under every kind of load — checks the books with
+`loyalty_health` afterwards, and fails if any Bot API call is made while a
+loyalty lock is held or shows a link to an unsaved code. All three run when
+`VSHOP_TEST_POSTGRES_URL` is set.
+
 ## Routing
 
 ```text
@@ -309,7 +386,7 @@ Catalog → categories → product cards → add to cart → cart (± quantity, 
 
 Name → delivery type (city-dependent) → address → preferred time → phone (contact share or typed) → confirmation → `OrderService.place_order_from_cart` → notify `MANAGER_CHAT_ID` + `ADMIN_IDS`.
 
-Cart row is locked with `SELECT … FOR UPDATE` during placement; FSM `submitted` + process lock reduce double-taps.
+Cart row is locked with `SELECT … FOR UPDATE` during placement, then the customer's loyalty account (see [Loyalty transactions and concurrency](#loyalty-transactions-and-concurrency)); FSM `submitted` + process lock reduce double-taps.
 
 ### My Stamp Card
 
@@ -397,14 +474,18 @@ Telegram's own share sheet (`https://t.me/share/url`) with a message naming the
 friend's bonus, 📋 Copy link is a `copy_text` button, and ⬅️ Back closes the
 screen. No id appears anywhere, and the screen's only callback closes it. Stamp
 counts go through `LocalizationService.plural` (the CLDR forms under
-`invite.stamps.*`), since the amounts are configurable.
+`invite.stamps.*`), since the amounts are configurable. The first visit creates
+the code under the customer's account lock, and the handler commits before
+sending the screen: a link never names a code that is not saved, and no lock is
+held while Telegram answers.
 
 `ReferralNotificationService` (`app/services/referral_notification.py`) closes
 the loop. The referrer hears when a friend joins (last in `/start`, after the
 attribution is committed), and both sides hear when the payout lands (last in
 the admin status change, after its commit; the amounts are read back from the
 ledger by `ReferralProgramService.payout_for_order`). The referrer's messages
-carry the 📤 button for the next invite. No message names the other side, and
+carry the 📤 button for the next invite, its link read by `existing_invitation`,
+which neither locks nor creates. No message names the other side, and
 failures are logged and swallowed. The newcomer's own `/start` replies stay
 identical whatever the code, so nothing tells a guesser that a code was real;
 only a customer opening their own link — who owns the code — is told it works.
@@ -448,6 +529,7 @@ present. Customer-facing city/delivery labels use the localized
 ## Concurrency & caching
 
 - Process-local `keyed_lock` for confirm actions (checkout, broadcast, product create/edit)
+- Loyalty: row locks, unique constraints and one lock order — see [Loyalty transactions and concurrency](#loyalty-transactions-and-concurrency)
 - Category list TTL cache (`app/utils/cache.py`), invalidated on category mutations
 - FSM: `MemoryStorage` (single process)
 

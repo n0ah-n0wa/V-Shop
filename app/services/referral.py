@@ -102,8 +102,17 @@ class ReferralService:
         self.orders = OrderRepository(session)
         self.loyalty = LoyaltyService(session)
 
+    async def referral_code(self, user_id: int) -> str | None:
+        """Read-only: the customer's code, if one was assigned — never creates, never locks."""
+        return await self.accounts.get_referral_code(user_id)
+
     async def get_or_create_referral_code(self, user_id: int) -> str:
         """The customer's personal code; assigned once, then stable."""
+        # A code never changes once stored, so reading it needs no lock; only
+        # assigning one does, and the lock then decides who assigns it.
+        existing = await self.referral_code(user_id)
+        if existing:
+            return existing
         account = await self.loyalty.lock_account(user_id)
         if account.referral_code:
             return account.referral_code

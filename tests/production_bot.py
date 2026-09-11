@@ -134,10 +134,16 @@ class RunningBot:
     storage — on the same database, the same Telegram and the same bot.
     """
 
-    def __init__(self, sessions: async_sessionmaker[AsyncSession], settings: Settings) -> None:
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        settings: Settings,
+        *,
+        telegram: FakeTelegram | None = None,
+    ) -> None:
         self.sessions = sessions
         self.settings = settings
-        self.telegram = FakeTelegram()
+        self.telegram = telegram or FakeTelegram()
         self.bot = Bot(
             token=BOT_TOKEN,
             session=self.telegram,

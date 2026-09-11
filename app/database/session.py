@@ -37,6 +37,10 @@ def get_engine() -> AsyncEngine:
         _engine = create_async_engine(
             settings.database_url,
             echo=settings.is_development,
+            # Bound parameters are customer data — names, phones, addresses,
+            # referral codes. They never reach a log line or an exception's
+            # text, whatever APP_ENV says: the echo shows the SQL, not the values.
+            hide_parameters=True,
             pool_pre_ping=True,
         )
     return _engine

@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.filters.localized_text import LocalizedText
 from app.handlers.user import invite as invite_screen
+from app.handlers.user import start as start_screen
 from app.handlers.user.invite import close_invite, open_invite
 from app.handlers.user.start import cmd_start
 from app.keyboards.invite import CALLBACK_INVITE_CLOSE, TELEGRAM_SHARE_URL
@@ -895,6 +896,57 @@ async def test_the_attribution_is_committed_before_the_referrer_hears(
 
     assert "send" in events
     assert events.index("commit") < events.index("send")
+
+
+async def test_every_start_is_committed_before_its_first_reply(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever the outcome — a refused one too — no lock is held while Telegram answers."""
+    alex = await make_user(session, telegram_id=9917)
+    bea = await make_user(session, telegram_id=9918)
+    alex_link = link_on(await open_screen(session, alex))
+    await ReferralProgramService(session).attribute_from_start(bea.id, payload_of(alex_link))
+    bea_link = link_on(await open_screen(session, bea))
+    await session.commit()
+    open_at_reply: list[bool] = []
+    onboarding = start_screen._continue_onboarding
+
+    async def continue_onboarding(*args: Any, **kwargs: Any) -> None:
+        open_at_reply.append(session.in_transaction())
+        await onboarding(*args, **kwargs)
+
+    monkeypatch.setattr(start_screen, "_continue_onboarding", continue_onboarding)
+
+    for telegram_id, payload in (
+        (9917, payload_of(bea_link)),  # a loop, refused under the attribution lock
+        (9917, payload_of(alex_link)),  # their own link
+        (9919, "ref_Fake-code-12"),  # someone new, with an unknown code
+        (9920, None),  # a plain /start
+    ):
+        open_at_reply.clear()
+        await send_start(session, telegram_id, payload)
+        assert open_at_reply == [False], payload
+
+
+async def test_the_invite_screen_is_committed_before_it_is_sent(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first visit creates the code under the account lock: saved, and released, first."""
+    user = await make_user(session, telegram_id=9921)
+    await session.commit()
+    open_at_send: list[bool] = []
+    keyboard_for = invite_screen.invite_keyboard
+
+    def invite_keyboard(*args: Any, **kwargs: Any) -> InlineKeyboardMarkup:
+        open_at_send.append(session.in_transaction())
+        return keyboard_for(*args, **kwargs)
+
+    monkeypatch.setattr(invite_screen, "invite_keyboard", invite_keyboard)
+
+    await open_screen(session, user)
+    await open_screen(session, user)
+
+    assert open_at_send == [False, False]
 
 
 async def test_a_referrer_who_blocked_the_bot_does_not_hold_up_the_friend(

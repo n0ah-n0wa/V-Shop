@@ -40,6 +40,7 @@ from app.models.order import Order
 from app.models.referral import Referral
 from app.models.roulette import RouletteSpinGrant
 from app.models.user import User
+from app.repositories.order import OrderRepository
 from app.repositories.referral import ReferralRepository
 from app.repositories.user import UserRepository
 from app.services import referral as referral_module
@@ -285,6 +286,50 @@ async def test_the_programme_builds_the_customers_own_link(session: AsyncSession
     assert link == f"https://t.me/VShopBot?start=ref_{await programme.referral_code(user.id)}"
 
 
+async def test_news_reads_the_link_without_creating_a_code(session: AsyncSession) -> None:
+    user = await make_user(session, telegram_id=900000003)
+    programme = ReferralProgramService(session)
+
+    assert await programme.existing_invitation(user.id, bot_username="VShopBot") is None
+    assert (
+        await session.scalar(
+            select(func.count())
+            .select_from(LoyaltyAccount)
+            .where(LoyaltyAccount.referral_code.is_not(None))
+        )
+        == 0
+    )
+
+    shown = await programme.invitation(user.id, bot_username="VShopBot")
+    assert await programme.existing_invitation(user.id, bot_username="VShopBot") == shown
+
+
+async def test_only_assigning_a_code_locks_the_account(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading a stored code — the invite screen, the news — never waits on the account."""
+    user = await make_user(session, telegram_id=900000004)
+    newcomer = await make_user(session, telegram_id=900000005)
+    programme = ReferralProgramService(session)
+    code = await programme.referral_code(user.id)
+    locked: list[int] = []
+    real_lock = LoyaltyService.lock_account
+
+    async def lock_account(self: LoyaltyService, user_id: int) -> LoyaltyAccount:
+        locked.append(user_id)
+        return await real_lock(self, user_id)
+
+    monkeypatch.setattr(LoyaltyService, "lock_account", lock_account)
+
+    assert await programme.referral_code(user.id) == code
+    await programme.invitation(user.id, bot_username="VShopBot")
+    await programme.existing_invitation(user.id, bot_username="VShopBot")
+    assert locked == []
+
+    await programme.referral_code(newcomer.id)
+    assert locked == [newcomer.id], "assigning one does"
+
+
 # ================================================================ deep links
 
 
@@ -399,6 +444,33 @@ async def test_a_customer_who_has_ordered_is_not_a_new_referral(session: AsyncSe
 
     assert attempt.outcome == ReferralOutcome.NOT_NEW_CUSTOMER
     assert await count_rows(session, Referral) == 0
+
+
+async def test_attribution_decides_under_the_customers_account_lock(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lock placing an order takes: a first order in flight and an attribution never overlap."""
+    _, payload = await referrer_with_link(session, 900000027)
+    customer = await make_user(session, telegram_id=900000028)
+    events: list[str] = []
+    real_lock = LoyaltyService.lock_account
+    real_has_any = OrderRepository.has_any_for_user
+
+    async def lock_account(self: LoyaltyService, user_id: int) -> LoyaltyAccount:
+        events.append(f"lock {user_id}")
+        return await real_lock(self, user_id)
+
+    async def has_any_for_user(self: OrderRepository, user_id: int) -> bool:
+        events.append(f"orders of {user_id}")
+        return await real_has_any(self, user_id)
+
+    monkeypatch.setattr(LoyaltyService, "lock_account", lock_account)
+    monkeypatch.setattr(OrderRepository, "has_any_for_user", has_any_for_user)
+
+    attempt = await ReferralProgramService(session).attribute_from_start(customer.id, payload)
+
+    assert attempt.outcome == ReferralOutcome.ATTRIBUTED
+    assert events.index(f"lock {customer.id}") < events.index(f"orders of {customer.id}")
 
 
 async def test_referral_loops_are_refused_all_the_way_up(session: AsyncSession) -> None:

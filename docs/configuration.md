@@ -47,7 +47,7 @@ only inside a URL button. Links are cached in-process for an hour.
 
 | Variable | Type | Default | Description |
 |---|---|---|---|
-| `APP_ENV` | string | `development` | Environment name; `development` / `dev` / `local` enable SQL echo |
+| `APP_ENV` | string | `development` | Environment name; `development` / `dev` / `local` enable SQL echo — statements only: bound parameters (customer data) are never logged, in any environment. Set `production` for a deployment |
 | `LOG_LEVEL` | string | `INFO` | Root logging level (`DEBUG`, `INFO`, `WARNING`, …) |
 | `TELEGRAM_SSL_VERIFY` | bool | `true` | Verify TLS when calling `api.telegram.org` |
 | `APP_TIMEZONE` | string | `Europe/Berlin` | IANA zone used for statistics month boundaries |

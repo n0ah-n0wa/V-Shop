@@ -412,6 +412,21 @@ async def test_scenario_8_every_redemption_path_locks_the_account_before_writing
     assert completion.index("lock orders") < completion.index("lock loyalty_accounts"), completion
 
 
+async def test_scenario_8_every_order_is_placed_under_the_account_lock(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    """With no reward too: a first order and a /start through a link queue on one lock."""
+    user = await make_user(session, telegram_id=8709)
+    await fill(session, user, await a_bottle(session), 1)
+
+    with locks_and_writes(engine, session) as checkout:
+        await place(session, user)
+
+    expected = ("lock carts", "lock loyalty_accounts", "insert orders")
+    steps = [checkout.index(step) for step in expected]
+    assert steps == sorted(steps), checkout
+
+
 # ------------------------------------------------------- 9: failed transactions
 
 

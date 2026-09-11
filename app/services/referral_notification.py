@@ -87,8 +87,10 @@ class ReferralNotificationService:
         referrer = await self.users.get_by_id(referral.referrer_user_id)
         if referrer is None:
             return None
-        i18n = LocalizationService.from_user(referrer)
         invitation = await self._invitation(referrer.id)
+        if invitation is None:  # cannot happen: the friend came in through the referrer's code
+            return None
+        i18n = LocalizationService.from_user(referrer)
         return referrer, format_friend_joined(invitation, i18n), self._send(invitation, i18n)
 
     async def _paid(self, order_id: int) -> list[News]:
@@ -108,13 +110,18 @@ class ReferralNotificationService:
             news.append((referrer, text, self._send(invitation, i18n)))
         return news
 
-    async def _invitation(self, user_id: int) -> Invitation:
+    async def _invitation(self, user_id: int) -> Invitation | None:
+        """The referrer's invitation, read without a lock: none is held while news goes out."""
         me = await self.bot.me()  # cached getMe: the link needs the bot's username
-        return await self.programme.invitation(user_id, bot_username=me.username or "")
+        return await self.programme.existing_invitation(user_id, bot_username=me.username or "")
 
     @staticmethod
-    def _send(invitation: Invitation, i18n: LocalizationService) -> InlineKeyboardMarkup:
+    def _send(
+        invitation: Invitation | None, i18n: LocalizationService
+    ) -> InlineKeyboardMarkup | None:
         """📤 Send to a friend, with the referrer's own link: the next invite in one tap."""
+        if invitation is None:
+            return None
         return share_keyboard(i18n, link=invitation.link, share_text=share_text(invitation, i18n))
 
     async def _give_up(self, what: str) -> None:

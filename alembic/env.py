@@ -77,6 +77,7 @@ async def run_async_migrations() -> None:
         configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        hide_parameters=True,  # a failed migration's traceback carries no customer data
     )
 
     async with connectable.connect() as connection:

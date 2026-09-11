@@ -86,6 +86,12 @@ class LoyaltyAccountRepository(BaseRepository[LoyaltyAccount]):
         result = cast(CursorResult[Any], await self.session.execute(statement))
         return max(result.rowcount, 0)
 
+    async def get_referral_code(self, user_id: int) -> str | None:
+        """The customer's stored code, read from the row itself: no lock, no identity map."""
+        return await self.session.scalar(
+            select(LoyaltyAccount.referral_code).where(LoyaltyAccount.user_id == user_id)
+        )
+
     async def get_by_referral_code(self, code: str) -> LoyaltyAccount | None:
         result = await self.session.scalars(
             select(LoyaltyAccount).where(LoyaltyAccount.referral_code == code)

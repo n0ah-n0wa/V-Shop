@@ -145,9 +145,10 @@ async def cmd_start(
             session, ReferralPolicy.from_settings(settings)
         ).attribute_from_start(user.id, command.args)
         logger.info("/start referral telegram_id=%s outcome=%s", user.telegram_id, attempt.outcome)
-        if attempt.outcome == ReferralOutcome.ATTRIBUTED:
-            # Durable before the referrer is told, at the end of this handler.
-            await session.commit()
+    # Durable before anyone is answered or the referrer told — and the locks an
+    # attribution takes (the customer's account, the attribution lock every
+    # /start with a link queues on) are released before the bot waits on Telegram.
+    await session.commit()
     i18n = LocalizationService.from_user(user)
 
     logger.info(

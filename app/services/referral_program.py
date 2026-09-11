@@ -147,12 +147,28 @@ class ReferralProgramService:
         """
         The customer's link, what it pays each side, and the friends it brought in.
 
-        Creates the customer's code on first use; everything else is read-only.
+        Creates the customer's code on first use — under their account lock, so
+        the caller commits before showing the link — and is read-only after.
         """
-        link = await self.referral_link(user_id, bot_username=bot_username)
+        code = await self.referral_code(user_id)
+        return await self._invitation(user_id, code, bot_username=bot_username)
+
+    async def existing_invitation(self, user_id: int, *, bot_username: str) -> Invitation | None:
+        """
+        Read-only: the customer's invitation, if they already have a code.
+
+        Takes no lock and creates nothing — safe to use while talking to
+        Telegram, as referral news does. ``None`` for a customer without a code.
+        """
+        code = await self.referrals.referral_code(user_id)
+        if code is None:
+            return None
+        return await self._invitation(user_id, code, bot_username=bot_username)
+
+    async def _invitation(self, user_id: int, code: str, *, bot_username: str) -> Invitation:
         invited, rewarded = await self.referrals.counts_for_referrer(user_id)
         return Invitation(
-            link=link,
+            link=referral_link(bot_username, code),
             referrer_stamps=self.policy.referrer_stamps,
             referred_stamps=self.policy.referred_stamps,
             referrer_spins=self.spins.policy.referral_spins,
@@ -202,6 +218,10 @@ class ReferralProgramService:
             return ReferralAttempt(ReferralOutcome.UNKNOWN_CODE)
         if referrer_id == user_id:
             return ReferralAttempt(ReferralOutcome.SELF_REFERRAL)
+        # Placing an order takes this lock too: an order being placed right now
+        # has either committed before the check below, or waits for this
+        # attribution — a customer is never attributed on top of their first order.
+        await self.loyalty.lock_account(user_id)
         existing = await self.referrals.get_for_referred_user(user_id)
         if existing is not None:
             return ReferralAttempt(ReferralOutcome.ALREADY_REFERRED, existing)

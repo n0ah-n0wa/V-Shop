@@ -248,6 +248,101 @@ def test_no_sql_keyword_is_string_formatted() -> None:
     assert offenders == [], f"SQL assembled by string formatting: {offenders}"
 
 
+# ------------------------------------------------------------------- logs
+
+
+# Fake, but shaped like what the database is sent: a customer's phone number.
+CUSTOMER_PHONE = "+49 151 0000 FAKE"
+ENGINE_FACTORIES = frozenset(
+    {"create_engine", "create_async_engine", "engine_from_config", "async_engine_from_config"}
+)
+
+
+@pytest.mark.asyncio
+async def test_sql_logging_never_carries_customer_data(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """
+    Regression (P1): customer data was written to the logs.
+
+    ``APP_ENV`` defaults to ``development`` — and the deployed ``.env`` said so
+    too — which turns SQL echo on, and the echo logged every statement with its
+    bound parameters: names, phone numbers, addresses, referral codes. In any
+    environment, a ``DBAPIError`` carried them into the traceback of a handled
+    error. The bot's engine now hides them, whatever the environment.
+    """
+    import io
+    import logging
+
+    from sqlalchemy import text as sql_text
+    from sqlalchemy.exc import DBAPIError
+
+    from app.database import session as database
+
+    development = Settings(
+        bot_token="123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        database_url="sqlite+aiosqlite:///:memory:",
+        manager_chat_id=-1001234567890,
+        app_env="development",
+    )
+    monkeypatch.setattr(database, "get_settings", lambda: development)
+    monkeypatch.setattr(database, "_engine", None)
+    monkeypatch.setattr(database, "_session_factory", None)
+    logged = io.StringIO()
+    handler = logging.StreamHandler(logged)
+    sql_log = logging.getLogger("sqlalchemy.engine")
+    sql_log.addHandler(handler)
+    engine = database.get_engine()
+    try:
+        assert engine.sync_engine.echo, "the premise: development echoes SQL"
+        async with engine.connect() as connection:
+            await connection.execute(sql_text("SELECT :phone"), {"phone": CUSTOMER_PHONE})
+            with pytest.raises(DBAPIError) as failure:
+                await connection.execute(
+                    sql_text("SELECT * FROM no_such_table WHERE phone = :phone"),
+                    {"phone": CUSTOMER_PHONE},
+                )
+    finally:
+        sql_log.removeHandler(handler)
+        await engine.dispose()
+
+    written = logged.getvalue() + capsys.readouterr().out
+    assert "SELECT" in written, "the statements are still echoed"
+    assert CUSTOMER_PHONE not in written
+    assert CUSTOMER_PHONE not in str(failure.value)
+
+
+def test_every_engine_hides_bound_parameters() -> None:
+    """
+    What keeps the regression above fixed: no engine can log customer data.
+
+    The bot, the deployment check and Alembic each build their own engine, and
+    every one must pass ``hide_parameters=True``.
+    """
+    sources = [*sorted(APP.rglob("*.py")), APP.parent / "alembic" / "env.py"]
+    engines: list[str] = []
+    offenders: list[str] = []
+    for path in sources:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name not in ENGINE_FACTORIES:
+                continue
+            where = f"{_relative(path)}:{node.lineno}"
+            engines.append(where)
+            if not any(
+                keyword.arg == "hide_parameters"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value is True
+                for keyword in node.keywords
+            ):
+                offenders.append(where)
+    assert len(engines) >= 3, f"the bot's, the check's and Alembic's engines: {engines}"
+    assert offenders == [], f"an engine that can log customer data: {offenders}"
+
+
 # ------------------------------------------------- cross-customer isolation
 
 

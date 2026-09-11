@@ -18,6 +18,7 @@ from app.repositories.cart_item import CartItemRepository
 from app.repositories.order import OrderRepository
 from app.repositories.order_item import OrderItemRepository
 from app.repositories.product import ProductRepository
+from app.services.loyalty import LoyaltyService
 from app.services.reward import Line, RewardOption, RewardPlan, RewardService
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,10 @@ class OrderService:
         cart = await self.carts.get_by_user_id_with_items(user.id, for_update=True)
         if cart is None or not cart.items:
             raise EmptyCartError("Cart is empty")
+        # The customer's loyalty lock, which a referral attribution takes too:
+        # this order and a /start through a friend's link are decided one after
+        # the other, never both on the view that the customer has not ordered.
+        await LoyaltyService(self.session).lock_account(user.id)
 
         line_items = await self._priced_lines(cart)
         total = _lines_total(line_items)

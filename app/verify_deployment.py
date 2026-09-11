@@ -327,7 +327,8 @@ async def collect(session: AsyncSession) -> dict[str, object]:
 
 
 async def main() -> int:
-    engine = create_async_engine(get_settings().database_url)
+    # No customer data in a traceback, should a query fail.
+    engine = create_async_engine(get_settings().database_url, hide_parameters=True)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
         async with factory() as session:

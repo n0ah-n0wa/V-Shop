@@ -49,6 +49,9 @@ async def render_invite(
         spin_policy=SpinPolicy.from_settings(settings),
     )
     invitation = await programme.invitation(user_id, bot_username=me.username or "")
+    # The first open creates the customer's code under their account lock: it
+    # is durable, and the lock released, before the link reaches anyone.
+    await session.commit()
     await target.answer(
         format_invite(invitation, i18n),
         reply_markup=invite_keyboard(
