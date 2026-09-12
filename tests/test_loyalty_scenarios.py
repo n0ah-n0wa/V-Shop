@@ -47,12 +47,14 @@ from app.models.enums import (
     LoyaltyTransactionType,
     OrderStatus,
     PaymentMethod,
+    ReferralStatus,
     RewardStatus,
     RewardType,
 )
 from app.models.loyalty import LoyaltyAccount, LoyaltyTransaction
 from app.models.order import Order
 from app.models.product import Product
+from app.models.referral import Referral
 from app.models.reward import UserReward
 from app.models.user import User
 from app.repositories.loyalty_transaction import LoyaltyTransactionRepository
@@ -60,6 +62,7 @@ from app.services.admin import AdminService, InvalidStatusTransitionError
 from app.services.cart import CartService
 from app.services.loyalty import InsufficientStampsError, StaleCardError
 from app.services.order import OrderService
+from app.services.referral import ReferralService
 from app.services.reward import RewardService, RewardUnavailableError
 from app.services.stamp_card import PurchaseAwardStatus, StampCardService
 from tests.factories import make_category, make_product, make_user
@@ -410,6 +413,33 @@ async def test_scenario_8_every_redemption_path_locks_the_account_before_writing
     assert redeem.index("lock user_rewards") < redeem.index("update user_rewards"), redeem
     # ... and completion takes the order before the account, never the reverse.
     assert completion.index("lock orders") < completion.index("lock loyalty_accounts"), completion
+
+
+async def test_scenario_8_a_payout_locks_its_referral_between_the_two_accounts(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    """The lock order in docs/architecture.md, as a friend's first order completes."""
+    referrer = await make_user(session, telegram_id=8731)
+    friend = await make_user(session, telegram_id=8732)
+    bottle = await a_bottle(session)
+    await ReferralService(session).attribute(
+        referrer_user_id=referrer.id, referred_user_id=friend.id
+    )
+    order = await ship(session, friend, bottle, 1)
+
+    with locks_and_writes(engine, session) as payout:
+        await configured_admin(session).set_order_status(order, OrderStatus.COMPLETED)
+
+    locks = [entry for entry in payout if entry.startswith("lock ")]
+    assert locks[0] == "lock orders", locks
+    friends_account = locks.index("lock loyalty_accounts")  # the stamp award's
+    referral = locks.index("lock referrals")
+    referrers_account = len(locks) - 1 - locks[::-1].index("lock loyalty_accounts")
+    assert friends_account < referral < referrers_account, locks
+    paid = await session.scalar(
+        select(Referral.status).where(Referral.referred_user_id == friend.id)
+    )
+    assert paid == ReferralStatus.QUALIFIED
 
 
 async def test_scenario_8_every_order_is_placed_under_the_account_lock(

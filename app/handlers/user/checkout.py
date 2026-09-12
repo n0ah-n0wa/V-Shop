@@ -730,6 +730,9 @@ async def checkout_confirm(
                 reward_id=chosen if isinstance(chosen, int) else None,
             )
         except EmptyCartError:
+            # Nothing was written. End the transaction — and the cart and loyalty
+            # locks it holds — before the customer is told; the same below.
+            await session.rollback()
             await state.clear()
             await clear_inline_markup(message)
             await callback.answer(localized.t("checkout.empty_cart"), show_alert=True)
@@ -739,6 +742,7 @@ async def checkout_confirm(
             )
             return
         except InactiveProductError:
+            await session.rollback()
             await state.clear()
             await clear_inline_markup(message)
             await callback.answer(localized.t("checkout.inactive_product"), show_alert=True)
@@ -748,6 +752,7 @@ async def checkout_confirm(
             )
             return
         except InvalidDeliveryError:
+            await session.rollback()
             await state.clear()
             await clear_inline_markup(message)
             await callback.answer(localized.t("checkout.invalid_delivery"), show_alert=True)

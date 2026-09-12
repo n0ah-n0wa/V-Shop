@@ -34,7 +34,7 @@ import pytest_asyncio
 from aiogram import Bot
 from aiogram.methods import AnswerCallbackQuery, GetMe, TelegramMethod
 from aiogram.types import InlineKeyboardMarkup
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import func, inspect, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -56,6 +56,7 @@ from app.models.enums import (
 )
 from app.models.loyalty import LoyaltyAccount, LoyaltyTransaction
 from app.models.order import Order
+from app.models.product import Product
 from app.models.referral import Referral
 from app.models.reward import UserReward
 from app.models.roulette import RouletteSpin, RouletteSpinGrant
@@ -74,7 +75,14 @@ from app.utils.cache import invalidate_categories_cache
 from app.verify_deployment import loyalty_health
 from tests.factories import make_category, make_order, make_product, make_user
 from tests.production_bot import FakeTelegram, RunningBot, tree_settings
-from tests.test_loyalty_journeys import TO_COMPLETED, admin_moves, buy, check_out, open_shop
+from tests.test_loyalty_journeys import (
+    TO_COMPLETED,
+    admin_moves,
+    buy,
+    check_out,
+    open_shop,
+    to_confirmation,
+)
 
 URL = os.environ.get("VSHOP_TEST_POSTGRES_URL", "")
 EN = LocalizationService("en")
@@ -540,10 +548,11 @@ class Watchful(FakeTelegram):
 async def test_no_telegram_call_waits_while_a_loyalty_lock_is_held(
     pg: Factory, lands: Callable[[str], None]
 ) -> None:
-    alex, bea = 9501, 9502
+    alex, bea, cai = 9501, 9502, 9503
     bottle = await open_shop(pg)
     async with pg() as session:
         await make_user(session, telegram_id=alex)
+        await make_user(session, telegram_id=cai)
         await session.commit()
     telegram = Watchful(URL)
     settings = tree_settings()
@@ -579,6 +588,26 @@ async def test_no_telegram_call_waits_while_a_loyalty_lock_is_held(
             order_id = await session.scalar(select(func.max(Order.id)))
         assert order_id is not None
         await admin_moves(bot, order_id, *TO_COMPLETED)  # the payout; both are told
+        # A product sold out while Cai confirms: refused, with nothing locked any more.
+        await buy(bot, cai, bottle)
+        await to_confirmation(bot, cai)
+        async with pg() as session:
+            await session.execute(
+                update(Product).where(Product.id == bottle).values(is_active=False)
+            )
+            await session.commit()
+        await bot.press(cai, "checkout:confirm")
+        assert bot.alerts(cai)[-1] == (EN.t("checkout.inactive_product"), True)
+        # A claim with too few stamps: refused, answered with Alex's account unlocked.
+        async with pg() as session:
+            alex_id = await session.scalar(select(User.id).where(User.telegram_id == alex))
+            assert alex_id is not None
+            version = await LoyaltyService(session).ledger_version(alex_id)
+        await bot.send(alex, EN.t("menu.stamp_card"))
+        await bot.press(
+            alex, f"stamp:claim:{version}", on=bot.screens(alex)[max(bot.screens(alex))]
+        )
+        assert bot.alerts(alex)[-1] == (EN.t("stamp_card.not_enough"), True)
     finally:
         await telegram.close()
 

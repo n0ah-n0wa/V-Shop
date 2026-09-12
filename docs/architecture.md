@@ -286,7 +286,7 @@ level without adding retries.
 |---|---|---|---|---|---|
 | Purchase stamps | The admin's status change to Completed (`set_order_status`); the handler commits before any message | order row → customer's account | `loyalty_transactions.order_id` | Status already Completed: `changed = False`, nothing booked or sent | Status, stamps, spin and referral payout roll back together |
 | Nth-purchase spin | The same, right after the stamps | account (held) | `roulette_spin_grants.order_id` | Numbered from the ledger's purchase rows under the account lock, so orders completing together get distinct numbers | As above |
-| Referral stamps, both sides | The same (`settle_for_completed_order`) | referral row → referred customer's account → referrer's account | `referrals.qualifying_order_id`; `loyalty_transactions (referral_id, user_id)` | Referral already `qualified`: nothing more | As above |
+| Referral stamps, both sides | The same (`settle_for_completed_order`) | referred customer's account (held since the stamp award) → referral row → referrer's account | `referrals.qualifying_order_id`; `loyalty_transactions (referral_id, user_id)` | Referral already `qualified`: nothing more | As above |
 | Referral spin | The same (`grant_for_referral`) | none — the unique index decides | `roulette_spin_grants (referral_id, user_id)` | Insert-or-find in a savepoint | As above |
 | Welcome spin | `/start`, committed before any reply; the start-up backfill, one statement before polling starts | none — the unique index decides | partial unique `roulette_spin_grants (user_id)` where `reason = 'initial_promo'` | `/start`: insert-or-find in a savepoint; backfill: `ON CONFLICT DO NOTHING` in `user_id` order | `/start` rolls back and the next one grants it; a failed backfill is logged and the bot starts |
 | Referral attribution | `/start ref_<code>`, committed before any reply | referred customer's account → attribution advisory lock | `referrals.referred_user_id` | Insert-or-find in a savepoint: `ALREADY_REFERRED` | Nothing written; onboarding carries on |
@@ -317,12 +317,16 @@ transactions wait on each other in a cycle:
 1. the process-local `keyed_lock` for the customer (checkout, roulette, claim);
 2. the customer's cart row (placing an order);
 3. the order row (a status change);
-4. the referral row (a payout);
-5. loyalty accounts — the order's customer first; in a payout the referred
-   customer, then the referrer. Attribution refuses loops anywhere up a chain,
-   so payouts running at once always wait towards the root of their chain;
-6. the operation's own rows: the grant, the reward;
-7. the attribution advisory lock (`/start ref_<code>` only), last.
+4. the customer's own loyalty account — in a completion, the order's customer,
+   whose account the stamp award takes before any payout;
+5. the referral row (a payout) — only ever after the referred customer's
+   account: a payout needs a Completed, post-launch order charged above €0,
+   exactly the order the stamp award has already locked that account for;
+6. the referrer's account, then up the chain. Attribution refuses loops
+   anywhere up a chain, so payouts running at once always wait towards the
+   root of their chain;
+7. the operation's own rows: the grant, the reward;
+8. the attribution advisory lock (`/start ref_<code>` only), last.
 
 Placing an order and attributing a referral both take the customer's account
 lock: an order being placed either commits before attribution asks whether the

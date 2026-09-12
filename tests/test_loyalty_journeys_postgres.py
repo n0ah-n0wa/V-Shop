@@ -31,20 +31,24 @@ import app.models  # noqa: F401  (populates the metadata)
 from app import lifecycle
 from app.database.base import Base
 from app.handlers.user import roulette as roulette_screen
-from app.models.enums import OrderStatus, RewardStatus, SpinGrantReason
+from app.models.enums import OrderStatus, RewardStatus, RewardType, SpinGrantReason
 from app.models.loyalty import LoyaltyAccount
 from app.models.order import Order
 from app.models.referral import Referral
 from app.models.roulette import RouletteSpin
 from app.models.user import User
 from app.services.localization import LocalizationService
+from app.services.loyalty import LoyaltyService
 from app.utils.cache import invalidate_categories_cache
+from app.verify_deployment import loyalty_health
 from tests.factories import make_user
 from tests.production_bot import ADMIN_ID, RunningBot, tree_settings
 from tests.test_loyalty_journeys import (
     PURCHASE,
     REFERRAL,
+    TO_COMPLETED,
     admin_moves,
+    balance,
     buy,
     check_out,
     count,
@@ -240,3 +244,87 @@ async def test_completions_racing_across_customers_book_each_once(
         assert await ledger(sessions, user_id, PURCHASE) == [2]
         assert said(bot, telegram_id, EN.t("notification.status_completed", order_id=order_id)) == 1
     assert no_errors(bot, ADMIN_ID, *customers)
+
+
+async def test_claim_taps_racing_claim_one_free_bottle(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """Concurrent reward requests: one card, many claim taps — one bottle, ten stamps."""
+    eve = 8641
+    async with sessions() as session:
+        eve_id = (await make_user(session, telegram_id=eve)).id
+        await session.commit()
+    await lifecycle.activate_loyalty(tree_settings())
+    async with sessions() as session:
+        await LoyaltyService(session).adjust(eve_id, amount=20, note="two full cards")
+        await session.commit()
+    bot = RunningBot(sessions, tree_settings())
+    await bot.send(eve, EN.t("menu.stamp_card"))
+    claim = bot.tap(eve, bot.button(eve, "stamp:claim:"))
+
+    await at_once(bot, *[claim] * RACERS)
+
+    free = [r for r in await rewards(sessions, eve_id) if r[1] == RewardType.FREE_BOTTLE]
+    assert len(free) == 1, "one card claims one bottle, however many taps land"
+    assert await balance(sessions, eve_id) == 10
+    assert [text for text, _ in bot.alerts(eve)].count(EN.t("stamp_card.claimed")) == 1
+    assert no_errors(bot, eve)
+
+
+async def test_one_customer_pressing_every_reward_button_at_once(
+    sessions: async_sessionmaker[AsyncSession], lands: Callable[[str], None]
+) -> None:
+    """A claim, a spin and a checkout confirm — each tapped over and over, all at once."""
+    fay = 8651
+    bottle = await open_shop(sessions)
+    async with sessions() as session:
+        fay_id = (await make_user(session, telegram_id=fay)).id
+        await session.commit()
+    settings = tree_settings(roulette_spin_every_n_purchases=1)
+    await lifecycle.activate_loyalty(settings)
+    bot = RunningBot(sessions, settings)
+    # A 5% discount from the welcome spin, and a purchase that earns a stamp and a spin.
+    lands("discount_5")
+    await bot.send(fay, EN.t("menu.roulette"))
+    await bot.press(fay, bot.button(fay, "roulette:spin:"))
+    discount = (await rewards(sessions, fay_id))[0][0]
+    await buy(bot, fay, bottle)
+    await check_out(bot, fay)
+    await admin_moves(bot, (await latest_order(sessions, fay_id)).id, *TO_COMPLETED)
+    async with sessions() as session:
+        await LoyaltyService(session).adjust(fay_id, amount=10, note="a full card")
+        await session.commit()
+    # Three screens ready: the full card, the roulette, and checkout at its last step.
+    await bot.send(fay, EN.t("menu.stamp_card"))
+    claim = bot.tap(fay, bot.button(fay, "stamp:claim:"))
+    await bot.send(fay, EN.t("menu.roulette"))
+    spin = bot.tap(fay, bot.button(fay, "roulette:spin:"))
+    await buy(bot, fay, bottle)
+    await bot.send(fay, EN.t("menu.cart"))
+    await bot.press(fay, "cart:checkout")
+    await bot.send(fay, "Fay")
+    await bot.press(fay, "checkout:delivery:pickup")
+    await bot.send(fay, "Street 1")
+    await bot.send(fay, "18:00")
+    await bot.send(fay, EN.t("checkout.use_telegram"))
+    await bot.press(fay, "checkout:pay:cash")
+    await bot.press(fay, f"checkout:reward:{discount}")
+    confirm = bot.tap(fay, "checkout:confirm")
+    lands("discount_10")  # a prize that books no stamps: the card on screen stays current
+
+    await at_once(bot, *([claim] * 3 + [spin] * 3 + [confirm] * 3))
+
+    kinds = [(r[1], r[2], r[3]) for r in await rewards(sessions, fay_id)]
+    assert kinds.count((RewardType.FREE_BOTTLE, 1, RewardStatus.AVAILABLE)) == 1
+    assert kinds.count((RewardType.DISCOUNT_PERCENT, 10, RewardStatus.AVAILABLE)) == 1
+    assert await count(sessions, RouletteSpin) == 2
+    assert await count(sessions, Order, Order.user_id == fay_id) == 2
+    placed = await latest_order(sessions, fay_id)
+    assert str(placed.total_price) == "19.00"
+    by_id = {r[0]: r[3:] for r in await rewards(sessions, fay_id)}
+    assert by_id[discount] == (RewardStatus.USED, placed.id)
+    assert await balance(sessions, fay_id) == 1  # 1 from the purchase + 10, then 10 claimed
+    async with sessions() as session:
+        health = await loyalty_health(session)
+    assert set(health["integrity"].values()) == {0}
+    assert no_errors(bot, fay)

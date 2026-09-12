@@ -122,8 +122,11 @@ async def buy(bot: RunningBot, telegram_id: int, bottle_id: int, quantity: int =
         await bot.press(telegram_id, f"cart:add:{bottle_id}")
 
 
-async def check_out(bot: RunningBot, telegram_id: int, *, reward_id: int | None = None) -> None:
-    """🛒 Cart → Checkout → name, pickup, address, time, contact, cash → (reward) → confirm."""
+async def to_confirmation(bot: RunningBot, telegram_id: int) -> None:
+    """
+    🛒 Cart → Checkout → name, pickup, address, time, contact, cash: the order summary —
+    or, for a customer holding a reward that fits the cart, the reward step.
+    """
     await bot.send(telegram_id, EN.t("menu.cart"))
     await bot.press(telegram_id, "cart:checkout")
     await bot.send(telegram_id, "Clara Schmidt")
@@ -132,6 +135,11 @@ async def check_out(bot: RunningBot, telegram_id: int, *, reward_id: int | None 
     await bot.send(telegram_id, "18:00")
     await bot.send(telegram_id, EN.t("checkout.use_telegram"))
     await bot.press(telegram_id, "checkout:pay:cash")
+
+
+async def check_out(bot: RunningBot, telegram_id: int, *, reward_id: int | None = None) -> None:
+    """🛒 Cart → Checkout → name, pickup, address, time, contact, cash → (reward) → confirm."""
+    await to_confirmation(bot, telegram_id)
     if bot.shows(telegram_id, "checkout:reward:none"):
         await bot.press(telegram_id, f"checkout:reward:{reward_id if reward_id else 'none'}")
     else:

@@ -464,15 +464,22 @@ async def change_order_status(
         change = await admin.order_admin.change_order_status(order, new_status)
     except InvalidStatusTransitionError:
         # Stale keyboard or crafted callback: refuse and re-render the truth.
+        # Nothing was written — end the transaction, and the order row lock it
+        # took, before answering, then read the order afresh.
+        await session.rollback()
+        current = await admin.get_order(order_id)
+        if current is None:
+            await callback.answer(i18n.t("admin.order_not_found"), show_alert=True)
+            return
         await callback.answer(
             i18n.t(
                 "admin.order_invalid_transition",
-                current=status_label(i18n, order.status),
+                current=status_label(i18n, current.status),
                 target=status_label(i18n, new_status),
             ),
             show_alert=True,
         )
-        await _send_order_view(message, i18n, order, list_kind=list_kind, page=page, edit=True)
+        await _send_order_view(message, i18n, current, list_kind=list_kind, page=page, edit=True)
         return
     # Commit before telling the customer: they must never hear about a change
     # that is not durable, and a Telegram failure must not undo it.

@@ -13,7 +13,8 @@ _STATUS_LOCALE = {
     OrderStatus.CANCELLED: "admin.order_status_cancelled",
 }
 
-# The action wording for moving an order *into* a status, e.g. "Mark as Shipped".
+# The action wording for moving an order *into* a status, e.g. "📦 Ship". Two share
+# a row on the order card, so each stays short enough for a phone in every language.
 _ACTION_LOCALE = {
     OrderStatus.NEW: "admin.order_action_reopen",
     OrderStatus.ACCEPTED: "admin.order_action_accept",

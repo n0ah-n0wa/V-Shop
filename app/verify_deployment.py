@@ -236,9 +236,9 @@ async def collect(session: AsyncSession) -> dict[str, object]:
                 "referrals": await count(Referral),
             }
         )
-        report["loyalty"] = await loyalty_health(session)
+        loyalty: object = await loyalty_health(session)
     else:
-        report["loyalty"] = {"schema": "missing: migration 3b9d6f2a8c14 is not applied"}
+        loyalty = {"schema": "missing: migration 3b9d6f2a8c14 is not applied"}
     report["db"] = db
     report["order_status_counts"] = {
         status.value: int(
@@ -323,6 +323,8 @@ async def collect(session: AsyncSession) -> dict[str, object]:
     rendered["dashboard_most_ordered"] = [(p.name_en, p.order_count) for p in stats.most_ordered]
 
     report["rendered"] = rendered
+    # Last, so every key the report had before the loyalty programme keeps its place.
+    report["loyalty"] = loyalty
     return report
 
 

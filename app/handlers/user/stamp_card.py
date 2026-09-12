@@ -172,10 +172,16 @@ async def claim_free_bottle(
                 user_id, card_version=version
             )
         except AlreadyClaimedError:
+            # A refusal writes nothing. Commit now, as the middleware would after
+            # the answer, so the account lock the claim took is released before
+            # the customer is answered.
+            await session.commit()
             notice = localized.t("stamp_card.already_claimed")
         except StaleCardError:
+            await session.commit()
             notice = localized.t("stamp_card.changed")
         except InsufficientStampsError:
+            await session.commit()
             notice = localized.t("stamp_card.not_enough")
         else:
             reward_id = reward.id
