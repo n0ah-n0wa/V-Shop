@@ -49,6 +49,7 @@ from app.keyboards.admin_products import (
     product_delete_confirm_keyboard,
     products_actions_keyboard,
 )
+from app.models.product import text_limit
 from app.services.admin import AdminService, ProductInUseError
 from app.services.localization import LocalizationService
 from app.states.admin import (
@@ -706,6 +707,13 @@ async def process_edit_text_step(
     if value is None:
         await message.answer(
             i18n.t("admin.product_text_invalid"),
+            reply_markup=admin_cancel_skip_keyboard(i18n),
+        )
+        return
+    limit = text_limit(data_key)
+    if limit is not None and len(value) > limit:
+        await message.answer(
+            i18n.t("admin.product_text_too_long", limit=limit),
             reply_markup=admin_cancel_skip_keyboard(i18n),
         )
         return

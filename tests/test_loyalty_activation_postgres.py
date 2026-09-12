@@ -251,3 +251,16 @@ async def test_launching_on_an_existing_shop_then_redeploying_and_restarting(
         now = await snapshot(session, columns)
         for name, rows in before.items():
             assert {row_id: now[name].get(row_id) for row_id in rows} == rows, name
+
+
+@pytest.mark.usefixtures("scratch")
+async def test_the_migrated_schema_is_the_models_schema() -> None:
+    """
+    ``alembic check`` against the migrated database.
+
+    The rest of the suite builds its schema with ``create_all``, so a model
+    column, index or constraint that no migration creates passes every other
+    test and fails the deploy; here it fails first.
+    """
+    await alembic("upgrade", "head")
+    await asyncio.to_thread(command.check, _alembic_config())

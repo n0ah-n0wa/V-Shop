@@ -32,7 +32,7 @@ from enum import StrEnum
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.models.enums import OrderStatus, ReferralStatus
+from app.models.enums import ReferralStatus
 from app.models.referral import Referral
 from app.repositories.order import OrderRepository
 from app.services.loyalty import LoyaltyService
@@ -43,6 +43,7 @@ from app.services.referral import (
     referral_link,
 )
 from app.services.spin_entitlement import SpinEntitlementService, SpinPolicy
+from app.services.stamp_card import is_qualifying_purchase
 
 logger = logging.getLogger(__name__)
 
@@ -258,11 +259,7 @@ class ReferralProgramService:
         order = await self.orders.get_by_id(order_id)
         if order is None:
             raise LookupError(f"Order {order_id} does not exist")
-        if (
-            order.status != OrderStatus.COMPLETED
-            or not order.loyalty_eligible
-            or order.total_price <= 0
-        ):
+        if not is_qualifying_purchase(order):
             return None
         referral = await self.referrals.get_for_referred_user(order.user_id)
         if referral is None or referral.status != ReferralStatus.PENDING:

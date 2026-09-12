@@ -27,6 +27,7 @@ from app.services.cart import CartService, CartView
 from app.services.catalog import CatalogService
 from app.services.localization import LocalizationService
 from app.services.user import UserService
+from app.utils.html import e
 from app.utils.telegram_ui import as_message
 from app.utils.validators import parse_positive_int
 
@@ -41,7 +42,7 @@ def format_cart_text(i18n: LocalizationService, view: CartView) -> str:
         lines.append(
             i18n.t(
                 "cart.item_line",
-                name=line.name,
+                name=e(line.name),
                 quantity=line.quantity,
                 price=line.line_total,
             )

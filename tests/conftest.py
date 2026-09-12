@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Callable, Iterator
 from decimal import Decimal
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -49,6 +50,38 @@ def _isolate_settings_from_the_environment() -> Iterator[None]:
     finally:
         Settings.model_config["env_file"] = original
         os.environ.update(saved)
+
+
+# --------------------------------------------------------------------------
+# A release run skips nothing.
+#
+# The PostgreSQL suites — the only proof that the locking holds — skip unless
+# VSHOP_TEST_POSTGRES_URL names a scratch database, so a run without one is
+# green and proves less. VSHOP_TEST_NO_SKIPS=1 fails the session on any skip.
+# --------------------------------------------------------------------------
+_SKIPPED: list[str] = []
+
+
+def _no_skips_allowed() -> bool:
+    return os.environ.get("VSHOP_TEST_NO_SKIPS", "").strip() == "1"
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    if report.skipped:
+        _SKIPPED.append(report.nodeid)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    if _no_skips_allowed() and _SKIPPED and exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pytest.Config) -> None:
+    if _no_skips_allowed() and _SKIPPED:
+        terminalreporter.section("VSHOP_TEST_NO_SKIPS=1")
+        terminalreporter.write_line(f"{len(_SKIPPED)} skipped test(s), and this run allows none:")
+        for nodeid in _SKIPPED[:20]:
+            terminalreporter.write_line(f"  {nodeid}")
 
 
 @pytest.fixture

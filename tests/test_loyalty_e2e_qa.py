@@ -30,6 +30,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import AnswerCallbackQuery, GetMe, TelegramMethod
 from aiogram.types import Message
 from sqlalchemy import event, select, update
@@ -43,12 +44,14 @@ from app.models.enums import (
     CityChoice,
     LanguageCode,
     OrderStatus,
+    PaymentMethod,
     ReferralStatus,
     RewardStatus,
     RewardType,
     RoulettePrizeType,
     SpinGrantReason,
 )
+from app.models.order import Order
 from app.models.product import Product
 from app.models.referral import Referral
 from app.models.roulette import RouletteSpin, RouletteSpinGrant
@@ -56,12 +59,15 @@ from app.models.user import User
 from app.repositories.cart import CartRepository
 from app.repositories.loyalty_account import LoyaltyAccountRepository
 from app.repositories.order import OrderRepository
+from app.repositories.order_item import OrderItemRepository
 from app.repositories.referral import ReferralRepository
 from app.repositories.roulette_spin_grant import RouletteSpinGrantRepository
 from app.repositories.user_reward import UserRewardRepository
+from app.services.cart import CartService
 from app.services.localization import LocalizationService
 from app.services.loyalty import LoyaltyService
 from app.services.loyalty_activation import ActivationReport
+from app.services.order import OrderService
 from app.utils.cache import invalidate_categories_cache
 from app.utils.i18n import SUPPORTED_LANGUAGES
 from app.utils.roulette_display import ICONS
@@ -90,6 +96,7 @@ from tests.test_loyalty_journeys import (
     status_tap,
     to_confirmation,
 )
+from tests.test_loyalty_languages import double_tap
 
 EN = LocalizationService("en")
 ERROR_KEYS = ("error.generic", "error.database", "error.unauthorized", "error.telegram")
@@ -827,3 +834,194 @@ async def test_no_answer_waits_while_a_lock_is_held(
     # ... and none of those answers waited while a lock was held.
     assert telegram.findings == []
     await books_are_exact(sessions)
+
+
+# ======================================================= failures on the way
+
+
+async def test_an_unexpected_failure_while_placing_an_order_is_answered(
+    sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing is kept, and the customer is told and given the menu back — no crash."""
+    bottle = await open_shop(sessions)
+    async with sessions() as session:
+        await make_user(session, telegram_id=9421)
+        await session.commit()
+    bot = RunningBot(sessions, tree_settings())
+    await buy(bot, 9421, bottle)
+    await to_confirmation(bot, 9421)
+
+    async def lines_fail(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("an order line could not be written")
+
+    monkeypatch.setattr(OrderItemRepository, "add_items", lines_fail)
+    await bot.press(9421, "checkout:confirm")
+
+    assert bot.alerts(9421)[-1] == (EN.t("error.generic"), True)
+    assert bot.texts(9421)[-1] == EN.t("error.generic")
+    assert await count(sessions, Order) == 0
+
+
+class AdminTapsExpire(FakeTelegram):
+    """Telegram refusing the answer to the admin's taps once ``expired`` — too late to answer."""
+
+    expired = False
+
+    async def make_request(
+        self, bot: Bot, method: TelegramMethod[Any], timeout: int | None = None
+    ) -> Any:
+        if (
+            self.expired
+            and isinstance(method, AnswerCallbackQuery)
+            and method.callback_query_id.startswith(f"{ADMIN_ID}:")
+        ):
+            raise TelegramBadRequest(method, "Bad Request: query is too old")
+        return await super().make_request(bot, method, timeout)
+
+
+async def test_a_failed_admin_screen_never_holds_back_the_referral_news(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    rex, fay = 9431, 9432
+    bottle = await open_shop(sessions)
+    async with sessions() as session:
+        for telegram_id in (rex, ADMIN_ID):
+            await make_user(session, telegram_id=telegram_id)
+        await session.commit()
+    telegram = AdminTapsExpire()
+    bot = RunningBot(sessions, tree_settings(), telegram=telegram)
+    await bot.send(rex, EN.t("menu.invite"))
+    payload = link_on(latest(bot, rex)).split("?start=")[1]
+    await bot.send(fay, f"/start {payload}", first_name="Fay")
+    await bot.press(fay, "lang:en")
+    await bot.press(fay, "city:berlin")
+    await buy(bot, fay, bottle)
+    await check_out(bot, fay)
+    order = await latest_order(sessions, await user_id(sessions, fay))
+    await admin_moves(bot, order.id, OrderStatus.ACCEPTED, OrderStatus.SHIPPED)
+
+    telegram.expired = True  # the admin's Completed tap can no longer be answered
+    await bot.press(ADMIN_ID, status_tap(order.id, OrderStatus.COMPLETED), on=latest(bot, ADMIN_ID))
+
+    assert (await latest_order(sessions, await user_id(sessions, fay))).status == (
+        OrderStatus.COMPLETED
+    )
+    assert times(bot, rex, EN.t("invite.news.paid")) == 1, "the referrer was never told"
+    assert times(bot, fay, EN.t("invite.news.welcome_bonus")) == 1, "the friend was never told"
+
+
+async def test_a_malformed_order_list_page_is_answered_once(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """Telegram takes one answer per tap; a second one fails into the error path."""
+    async with sessions() as session:
+        await make_user(session, telegram_id=ADMIN_ID)
+        await session.commit()
+    bot = RunningBot(sessions, tree_settings())
+    await bot.send(ADMIN_ID, EN.t("admin.menu_orders"))
+
+    for data in ("admin:ord:new:x", "admin:ord:done:-1"):
+        before = len(bot.alerts(ADMIN_ID))
+        await bot.press(ADMIN_ID, data, on=latest(bot, ADMIN_ID))
+        assert bot.alerts(ADMIN_ID)[before:] == [(EN.t("error.invalid_callback"), True)], data
+
+
+# ======================================================= the guards, through the real handlers
+
+
+async def test_a_double_tapped_confirm_places_one_order(
+    sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two taps, the second while the first is at work: one order, and the second is told."""
+    bottle = await open_shop(sessions)
+    async with sessions() as session:
+        await make_user(session, telegram_id=9441)
+        await session.commit()
+    bot = RunningBot(sessions, tree_settings())
+    await buy(bot, 9441, bottle)
+    await to_confirmation(bot, 9441)
+
+    await double_tap(bot, 9441, "checkout:confirm", monkeypatch)
+
+    assert await count(sessions, Order) == 1
+    assert (EN.t("checkout.already_submitted"), True) in bot.alerts(9441)
+
+
+async def test_a_repeated_status_tap_tells_the_customer_once(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """A second tap, or the same update delivered again, moves nothing and tells no one."""
+    bottle = await open_shop(sessions)
+    async with sessions() as session:
+        for telegram_id in (9451, ADMIN_ID):
+            await make_user(session, telegram_id=telegram_id)
+        await session.commit()
+    bot = RunningBot(sessions, tree_settings())
+    await buy(bot, 9451, bottle)
+    await check_out(bot, 9451)
+    order = await latest_order(sessions, await user_id(sessions, 9451))
+    await admin_moves(bot, order.id, OrderStatus.ACCEPTED)
+
+    again = bot.tap(ADMIN_ID, status_tap(order.id, OrderStatus.ACCEPTED), on=latest(bot, ADMIN_ID))
+    await bot.feed(again)
+    await bot.feed(again)
+
+    assert times(bot, 9451, EN.t("notification.status_accepted", order_id=order.id)) == 1
+
+
+async def test_a_reward_used_meanwhile_is_refused_at_confirm_with_nothing_locked(
+    sessions: async_sessionmaker[AsyncSession],
+    lands: Callable[[str], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    At Confirm, the reward chosen on the summary has meanwhile paid for another order.
+
+    The transaction that found it spent is rolled back — its cart and account
+    locks with it — before the customer hears, and the reward stays spent once.
+    """
+    eve = 9481
+    bottle = await open_shop(sessions)
+    async with sessions() as session:
+        await make_user(session, telegram_id=eve)
+        await session.commit()
+    settings = tree_settings()
+    await lifecycle.activate_loyalty(settings)
+    telegram = LockWatch()
+    bot = RunningBot(sessions, settings, telegram=telegram)
+    eve_id = await user_id(sessions, eve)
+
+    lands("discount_10")
+    await bot.send(eve, EN.t("menu.roulette"))
+    await bot.press(eve, bot.button(eve, "roulette:spin:"))
+    ((reward_id, *_),) = await rewards(sessions, eve_id)
+    await buy(bot, eve, bottle, quantity=2)
+    await to_confirmation(bot, eve)
+    await bot.press(eve, f"checkout:reward:{reward_id}")
+
+    # Meanwhile the same reward pays for an order placed elsewhere; the cart is refilled.
+    async with sessions() as session:
+        user = await session.get(User, eve_id)
+        assert user is not None
+        await OrderService(session).place_order_from_cart(
+            user,
+            customer_name="Eve",
+            delivery_type="pickup",
+            address="Street 1",
+            preferred_time="now",
+            phone=None,
+            payment_method=PaymentMethod.CASH,
+            reward_id=reward_id,
+        )
+    async with sessions() as session:
+        product = await session.get(Product, bottle)
+        assert product is not None
+        await CartService(session).add_product(eve_id, product, quantity=2)
+        await session.commit()
+
+    with watching_locks(telegram, monkeypatch):
+        await bot.press(eve, "checkout:confirm")
+
+    assert bot.alerts(eve)[-1] == (EN.t("checkout.reward_unavailable"), True)
+    assert [row[3] for row in await rewards(sessions, eve_id)] == [RewardStatus.USED]
+    assert telegram.findings == []

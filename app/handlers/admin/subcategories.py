@@ -39,7 +39,7 @@ from app.states.admin import CreateSubcategoryStates, RenameSubcategoryStates
 from app.utils.confirm import confirm_once
 from app.utils.html import e
 from app.utils.telegram_ui import as_message
-from app.utils.validators import nonempty, parse_callback_id
+from app.utils.validators import nonempty, parse_callback_id, parse_positive_int
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +68,10 @@ def _parse_id_and_lang(data: str, prefix: str) -> tuple[int, str] | None:
     """Parse ``prefix{id}:{lang}`` callbacks."""
     raw = data.removeprefix(prefix)
     parts = raw.split(":")
-    if len(parts) != 2 or not parts[0].isdigit() or parts[1] not in _LANGUAGE_FIELDS:
+    row_id = parse_positive_int(parts[0]) if len(parts) == 2 else None
+    if row_id is None or parts[1] not in _LANGUAGE_FIELDS:
         return None
-    return int(parts[0]), parts[1]
+    return row_id, parts[1]
 
 
 async def _render_list(
@@ -539,10 +540,11 @@ async def confirm_assign(
         await callback.answer()
         return
     raw = callback.data.removeprefix(CALLBACK_SUB_ASSIGN_TO_PREFIX).split(":")
-    if len(raw) != 2 or not all(part.isdigit() for part in raw):
+    sub_id = parse_positive_int(raw[0]) if len(raw) == 2 else None
+    category_id = parse_positive_int(raw[1]) if len(raw) == 2 else None
+    if sub_id is None or category_id is None:
         await callback.answer(i18n.t("error.invalid_callback"), show_alert=True)
         return
-    sub_id, category_id = int(raw[0]), int(raw[1])
 
     admin = AdminService(session)
     subcategory = await admin.get_subcategory(sub_id)

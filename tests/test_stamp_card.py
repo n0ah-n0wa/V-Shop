@@ -34,10 +34,14 @@ from app.services.admin import AdminService
 from app.services.cart import CartService
 from app.services.loyalty import InsufficientStampsError, LoyaltyService
 from app.services.order import OrderService
+from app.services.referral import ReferralService
+from app.services.referral_program import ReferralProgramService
 from app.services.stamp_card import (
     PurchaseAwardStatus,
     StampCardPolicy,
     StampCardService,
+    is_qualifying_purchase,
+    purchase_disqualification,
 )
 from tests.factories import make_category, make_product, make_user
 
@@ -594,3 +598,50 @@ def test_the_downgrade_is_guarded() -> None:
     first = next(n for n in _function("downgrade").body if isinstance(n, ast.Expr)).value
     assert isinstance(first, ast.Call) and isinstance(first.func, ast.Name)
     assert first.func.id == "_refuse_to_forget_eligibility"
+
+
+# ------------------------------------------------------------ one rule, one place
+
+
+@pytest.mark.parametrize(
+    ("status", "eligible", "total", "why_not"),
+    [
+        (OrderStatus.COMPLETED, True, "20.00", None),
+        (OrderStatus.COMPLETED, True, "0.01", None),  # 0 stamps, still a purchase
+        (OrderStatus.SHIPPED, True, "20.00", PurchaseAwardStatus.NOT_COMPLETED),
+        (OrderStatus.CANCELLED, True, "20.00", PurchaseAwardStatus.NOT_COMPLETED),
+        (OrderStatus.COMPLETED, False, "20.00", PurchaseAwardStatus.NOT_ELIGIBLE),
+        (OrderStatus.COMPLETED, True, "0.00", PurchaseAwardStatus.NOT_PAID),
+    ],
+)
+async def test_one_rule_decides_what_a_qualifying_purchase_is(
+    session: AsyncSession,
+    status: OrderStatus,
+    eligible: bool,
+    total: str,
+    why_not: PurchaseAwardStatus | None,
+) -> None:
+    """Stamps and referral payouts ask the same question, so they can never disagree."""
+    referrer = await make_user(session, telegram_id=8301)
+    friend = await make_user(session, telegram_id=8302)
+    await ReferralService(session).attribute(
+        referrer_user_id=referrer.id, referred_user_id=friend.id
+    )
+    order = await place(session, friend, total, eligible=eligible)
+    order.status = status
+    await session.flush()
+
+    assert purchase_disqualification(order) == why_not
+    assert is_qualifying_purchase(order) is (why_not is None)
+    award = await StampCardService(session, POLICY).award_for_order(order.id)
+    assert (award.status == PurchaseAwardStatus.AWARDED) is (why_not is None)
+    payout = await ReferralProgramService(session).settle_for_completed_order(order.id)
+    assert (payout is not None) is (why_not is None)
+
+
+def test_the_referral_modules_do_not_restate_the_rule() -> None:
+    """Changing what a qualifying purchase is must stay one edit, in stamp_card.py."""
+    for name in ("referral.py", "referral_program.py"):
+        source = (ROOT / "app" / "services" / name).read_text(encoding="utf-8")
+        assert "loyalty_eligible" not in source, f"{name} spells out the rule again"
+        assert "is_qualifying_purchase" in source, f"{name} no longer asks the one rule"

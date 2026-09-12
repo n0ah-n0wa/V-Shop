@@ -118,10 +118,18 @@ def test_the_documented_middleware_order_matches_the_code() -> None:
 
     numbered = re.findall(r"^\d+\.\s+\*\*(.+?)\*\*", TEXT["architecture.md"], re.MULTILINE)
     documented = numbered[: len(actual)]
+    # The list must end where the code's does: a middleware dropped from the code
+    # but still documented would otherwise pass as a matching prefix.
+    beyond = [
+        label
+        for label in numbered[len(actual) : len(actual) + 1]
+        if label in variable_to_label.values()
+    ]
 
     assert documented == actual, (
         f"architecture.md lists {documented} but the code registers {actual}"
     )
+    assert beyond == [], f"architecture.md also lists {beyond}, which the code does not register"
 
 
 def test_the_documented_status_transitions_match_the_code() -> None:
@@ -150,11 +158,34 @@ def test_the_compose_project_and_volume_names_are_documented() -> None:
     """
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     project = re.search(r"^name:\s*(\S+)", compose, re.MULTILINE)
-    volume = re.search(r"name:\s*\$\{POSTGRES_VOLUME_NAME:-(\S+?)\}", compose)
+    volume = re.search(r"name:\s*\"?\$\{POSTGRES_VOLUME_NAME:\?", compose)
 
     assert project and volume, "docker-compose.yml no longer pins both names"
     assert project.group(1) in ALL_DOCS, "the Compose project name is undocumented"
-    assert volume.group(1) in ALL_DOCS, "the default volume name is undocumented"
+    assert "POSTGRES_VOLUME_NAME" in ALL_DOCS, "the volume setting is undocumented"
+
+
+def test_compose_never_creates_or_defaults_the_database_volume() -> None:
+    """
+    The catalog-loss incident, closed at its source.
+
+    A volume Compose may create — or one with a default name — lets a redeploy
+    attach the bot to a new, empty database without a word: migrations apply,
+    the bot starts healthy, the catalog is gone. The volume must be `external`,
+    and its name required, so a missing or wrong name stops `docker compose up`.
+    """
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    block = re.search(r"(?ms)^volumes:\n  pgdata:\n(.*?)(?=^\S|\Z)", compose)
+
+    assert block, "docker-compose.yml no longer declares the pgdata volume"
+    settings = "\n".join(
+        line.strip() for line in block.group(1).splitlines() if not line.strip().startswith("#")
+    )
+    assert "external: true" in settings, "the database volume must be external"
+    assert re.search(r"\$\{POSTGRES_VOLUME_NAME:\?[^}]+\}", settings), (
+        "POSTGRES_VOLUME_NAME must be required (`:?`), never defaulted"
+    )
+    assert ":-" not in settings, "the database volume name must have no default"
 
 
 def test_destructive_operations_are_named_as_such() -> None:
@@ -347,22 +378,22 @@ def test_the_quick_start_matches_the_deployment_runbook() -> None:
     """Both entry points must name the same file and the same command."""
     readme = TEXT["README.md"]
     assert "cp .env.example .env" in readme
+    assert "docker volume create vshop_pgdata" in readme
     assert "docker compose up" in readme
+    assert "docker volume create vshop_pgdata" in TEXT["deployment.md"]
     assert "docker compose up -d --build" in TEXT["deployment.md"]
 
 
-def test_the_default_volume_name_is_in_the_deployment_runbook() -> None:
+def test_the_volume_setup_is_in_the_deployment_runbook() -> None:
     """
     Not merely "documented somewhere".
 
-    An operator upgrading an existing deployment follows deployment.md, so the
-    volume name has to be correct *there* — otherwise they point the stack at
-    storage that does not hold their data.
+    Compose never creates the database volume, so the runbook an operator
+    follows must say how to create one for a new deployment and how to name the
+    existing one when upgrading — otherwise they point the stack at storage that
+    does not hold their data, or cannot start it at all.
     """
-    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    volume = re.search(r"name:\s*\$\{POSTGRES_VOLUME_NAME:-(\S+?)\}", compose)
-
-    assert volume, "docker-compose.yml no longer pins the volume name"
-    assert volume.group(1) in TEXT["deployment.md"], (
-        f"deployment.md does not mention the real default volume {volume.group(1)!r}"
-    )
+    deployment = TEXT["deployment.md"]
+    assert "docker volume create vshop_pgdata" in deployment
+    assert 'echo "POSTGRES_VOLUME_NAME=vshop_pgdata" >> .env' in deployment
+    assert "POSTGRES_VOLUME_NAME=v-shop_pgdata" in deployment, "the upgrade example is gone"

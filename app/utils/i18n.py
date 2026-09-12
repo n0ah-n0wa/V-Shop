@@ -118,9 +118,15 @@ def normalize_language(language: LanguageCode | str | None) -> str:
 def translate(
     key: str,
     language: LanguageCode | str | None = None,
+    /,
     **kwargs: object,
 ) -> str:
-    """Translate ``key`` for ``language`` with optional ``str.format`` kwargs."""
+    """
+    Translate ``key`` for ``language`` with optional ``str.format`` kwargs.
+
+    ``key`` and ``language`` are positional-only, so a template's placeholders
+    may take any name — ``{language}`` included — without colliding with them.
+    """
     code = normalize_language(language)
     catalog = load_locale(code)
     template = catalog.get(key)

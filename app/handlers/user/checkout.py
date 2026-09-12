@@ -608,7 +608,7 @@ async def _show_confirmation(
     Render the order summary for ``user``.
 
     The customer is passed in rather than read from ``message.from_user``: the
-    only caller reaches here from a callback query and hands us
+    callers reach here from callback queries and hand us
     ``callback.message`` — a message the *bot* sent, whose ``from_user`` is the
     bot. Resolving the user from it loaded the bot's (empty) cart and told the
     customer their cart was empty at the last step of checkout.
@@ -717,6 +717,9 @@ async def checkout_confirm(
 
         await state.update_data(submitted=True)
         chosen = data.get("reward_id")
+        # Read while the user row is loaded: a rollback below expires it, and an
+        # async session cannot load it back lazily.
+        customer_id = user.id
 
         try:
             order = await OrderService(session).place_order_from_cart(
@@ -774,7 +777,7 @@ async def checkout_confirm(
         except Exception:
             await state.update_data(submitted=False)
             await session.rollback()
-            logger.exception("Failed to place order for user_id=%s", user.id)
+            logger.exception("Failed to place order for user_id=%s", customer_id)
             await callback.answer(localized.t("error.generic"), show_alert=True)
             await message.answer(
                 localized.t("error.generic"),

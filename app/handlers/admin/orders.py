@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -39,6 +40,7 @@ from app.services.localization import LocalizationService
 from app.services.referral_notification import ReferralNotificationService
 from app.states.admin import ADMIN_WIZARD_STATES, SearchOrderStates
 from app.utils.admin_order import format_admin_order_card
+from app.utils.html import e
 from app.utils.telegram_ui import as_message, clamp_page, edit_or_answer, page_count
 from app.utils.validators import allowlist, nonempty, parse_nonnegative_int, parse_positive_int
 
@@ -219,10 +221,10 @@ async def view_new_orders(
     state: FSMContext,
     session: AsyncSession,
 ) -> None:
-    await callback.answer()
     await state.clear()
     message = as_message(callback)
     if message is None or callback.data is None:
+        await callback.answer()
         return
 
     page = 0
@@ -233,6 +235,8 @@ async def view_new_orders(
             return
         page = parsed
 
+    # Answered once, after parsing: Telegram accepts one answer per tap.
+    await callback.answer()
     await _show_order_list(
         message,
         i18n,
@@ -252,10 +256,10 @@ async def view_completed_orders(
     state: FSMContext,
     session: AsyncSession,
 ) -> None:
-    await callback.answer()
     await state.clear()
     message = as_message(callback)
     if message is None or callback.data is None:
+        await callback.answer()
         return
 
     page = 0
@@ -266,6 +270,8 @@ async def view_completed_orders(
             return
         page = parsed
 
+    # Answered once, after parsing: Telegram accepts one answer per tap.
+    await callback.answer()
     await _show_order_list(
         message,
         i18n,
@@ -387,7 +393,7 @@ async def process_search(
 
     if not orders:
         await message.answer(
-            i18n.t("admin.orders_search_empty", query=query),
+            i18n.t("admin.orders_search_empty", query=e(query)),
             reply_markup=admin_menu_keyboard(i18n),
         )
         await message.answer(
@@ -405,7 +411,7 @@ async def process_search(
         return
 
     await message.answer(
-        i18n.t("admin.orders_search_results", count=len(orders), query=query),
+        i18n.t("admin.orders_search_results", count=len(orders), query=e(query)),
         reply_markup=admin_menu_keyboard(i18n),
     )
     await message.answer(
@@ -491,22 +497,29 @@ async def change_order_status(
     if change.changed and order.user is not None:
         await CustomerOrderNotificationService(bot).notify_status_change(order, order.user)
 
-    await callback.answer(
-        i18n.t(
-            "admin.order_status_changed",
-            order_id=order.id,
-            status=status_label(i18n, order.status),
+    try:
+        await callback.answer(
+            i18n.t(
+                "admin.order_status_changed",
+                order_id=order.id,
+                status=status_label(i18n, order.status),
+            )
         )
-    )
-    view_target = as_message(callback)
-    if view_target is not None:
-        await _send_order_view(
-            view_target,
-            i18n,
-            order,
-            list_kind=list_kind,
-            page=page,
-            edit=True,
+        view_target = as_message(callback)
+        if view_target is not None:
+            await _send_order_view(
+                view_target,
+                i18n,
+                order,
+                list_kind=list_kind,
+                page=page,
+                edit=True,
+            )
+    except TelegramAPIError:
+        # The admin's own screen is best effort: the change is committed, and
+        # the referral news below must go out whatever happened to it.
+        logger.warning(
+            "Could not refresh the admin's order screen order_id=%s", order.id, exc_info=True
         )
     if change.changed and order.status == OrderStatus.COMPLETED:
         # Last, after the commit: tell both sides of a referral this completion

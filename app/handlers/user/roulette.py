@@ -263,9 +263,11 @@ async def spin_roulette(
                 if outcome is not None
                 else None
             )
-            if outcome is not None and outcome.created:
-                # Durable before the customer is shown anything.
-                await session.commit()
+            # Durable before the customer is shown anything. On a replay or a
+            # refusal it only ends the transaction: a request that waited while
+            # another spent the same grant replays it under the account and
+            # grant locks, and no lock may outlive this point into Telegram.
+            await session.commit()
         except SQLAlchemyError:
             # Nothing of the spin is kept: it stays unspent. Had the commit
             # reached the database after all, the same button replays it.

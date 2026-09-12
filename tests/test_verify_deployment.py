@@ -63,6 +63,11 @@ async def test_a_consistent_state_has_no_integrity_problem(session: AsyncSession
         "spin_grants_out_of_step_with_spins": 0,
         "spins_without_their_prize": 0,
         "referral_bonuses_before_qualification": 0,
+        "purchase_stamps_on_orders_that_do_not_qualify": 0,
+        "milestone_spins_without_their_purchase": 0,
+        "used_rewards_on_another_customers_order": 0,
+        "free_bottles_without_their_free_line": 0,
+        "referrals_qualified_by_an_order_that_does_not": 0,
     }
     assert health["coverage"] == {"users_without_account": 0, "users_without_welcome_spin": 0}
 

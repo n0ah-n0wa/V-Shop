@@ -43,7 +43,7 @@ from app.states.admin import (
 from app.utils.html import e
 from app.utils.product_display import localized_category_name
 from app.utils.telegram_ui import as_message, edit_or_answer
-from app.utils.validators import nonempty, parse_callback_id
+from app.utils.validators import nonempty, parse_callback_id, parse_positive_int
 
 logger = logging.getLogger(__name__)
 
@@ -387,10 +387,11 @@ async def start_edit_category_name(
         await callback.answer()
         return
     raw = callback.data.removeprefix(CALLBACK_CATEGORY_NAME_PREFIX).split(":")
-    if len(raw) != 2 or not raw[0].isdigit() or raw[1] not in LANGUAGE_FIELDS:
+    category_id = parse_positive_int(raw[0]) if len(raw) == 2 else None
+    if category_id is None or raw[1] not in LANGUAGE_FIELDS:
         await callback.answer(i18n.t("error.invalid_callback"), show_alert=True)
         return
-    category_id, language = int(raw[0]), raw[1]
+    language = raw[1]
 
     category = await AdminService(session).get_category(category_id)
     if category is None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import string
+
 import pytest
 
 from app.models.enums import LanguageCode
@@ -82,7 +84,7 @@ def test_localization_service_from_code_and_default() -> None:
 
     ru = LocalizationService.from_code(LanguageCode.RU)
     assert ru.language == "ru"
-    assert ru.t("menu.catalog") != default.t("menu.catalog") or ru.language != default.language
+    assert ru.t("menu.catalog") != default.t("menu.catalog")
 
 
 def test_localization_service_with_language() -> None:
@@ -101,3 +103,30 @@ def test_load_locale_contains_core_keys() -> None:
     catalog = load_locale("en")
     for key in ("menu.catalog", "menu.cart", "menu.info", "admin.access_denied"):
         assert key in catalog
+
+
+@pytest.mark.parametrize("code", SUPPORTED_LANGUAGES)
+def test_every_text_renders_with_its_placeholders_filled(code: str) -> None:
+    """
+    Every template, filled in as a call site fills it, renders — in every language.
+
+    ``translate`` hands back the raw template when formatting fails, so a broken
+    one shows its braces; and a placeholder named like a parameter of ``t`` —
+    ``{language}`` was — raised instead, failing the screen for every admin.
+    """
+    i18n = LocalizationService(code)
+    broken = []
+    for key, template in load_locale(code).items():
+        fields = {name for _, name, _, _ in string.Formatter().parse(template) if name}
+        values = {name: f"<{name}>" for name in fields}
+        rendered = i18n.t(key, **values)
+        if not all(value in rendered for value in values.values()):
+            broken.append(key)
+    assert broken == []
+
+
+@pytest.mark.parametrize("code", SUPPORTED_LANGUAGES)
+def test_no_text_carries_an_escaped_newline(code: str) -> None:
+    """A doubled backslash in the JSON reaches the chat as a literal backslash-n."""
+    offenders = sorted(key for key, text in load_locale(code).items() if "\\n" in text)
+    assert offenders == []

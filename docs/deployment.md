@@ -18,13 +18,26 @@ The repository ships a production-oriented Compose stack:
    `POSTGRES_PASSWORD` (it defaults to `vshop` if you leave it unset — see
    [Configuration](configuration.md#docker-compose-extras)).
 4. Postgres is published on `127.0.0.1` only by default (see `docker-compose.yml`). For stricter production, omit the `db` ports mapping entirely so only the bot container can reach Postgres on the internal network.
-5. Start:
+5. Create the database volume and name it in `.env` — **new deployments only**;
+   when upgrading an existing one, follow the next section instead:
+
+```bash
+docker volume create vshop_pgdata
+echo "POSTGRES_VOLUME_NAME=vshop_pgdata" >> .env
+```
+
+   Compose never creates this volume. It is declared `external` and
+   `POSTGRES_VOLUME_NAME` has no default, so an unset or mistyped name stops
+   `docker compose up` with an error instead of starting the bot on a new,
+   empty database — the failure that once made the catalog "disappear".
+
+6. Start:
 
 ```bash
 docker compose up -d --build
 ```
 
-6. Follow logs:
+7. Follow logs:
 
 ```bash
 docker compose logs -f bot
@@ -32,13 +45,16 @@ docker compose logs -f bot
 
 ## Upgrading an existing deployment
 
-**Do this once, before the first deploy of a version that pins the volume name.**
+**Do this once, before the first deploy of a version whose database volume is
+`external`** — this one: the stack refuses to start until you have.
 
 Earlier revisions of `docker-compose.yml` did not pin the Compose project or the
 volume name, so both were derived from the deployment directory. Your database
 may therefore live in a volume named after that directory (`v-shop_pgdata`,
-`vshop-2026_pgdata`, …) rather than the new default `vshop_pgdata`. Deploying
-without checking would start the stack against a **new, empty** database.
+`vshop-2026_pgdata`, …) rather than `vshop_pgdata`. The revisions after them
+pinned a default name instead, and deploying one of those without checking
+started the stack against a **new, empty** database. This one has no default:
+it only ever uses the volume you name.
 
 1. Find the volume currently in use:
 
@@ -47,7 +63,8 @@ docker inspect vshop-db --format '{{ (index .Mounts 0).Name }}'
 docker volume ls
 ```
 
-2. If the name is **not** `vshop_pgdata`, record it in `.env`:
+2. Record it in `.env` — required, whatever the name; the stack will not start
+   without it:
 
 ```env
 POSTGRES_VOLUME_NAME=v-shop_pgdata
@@ -112,12 +129,14 @@ different storage. The old volume is almost certainly still on disk — see
 diverge.
 
 This procedure is safe to run from any directory, including a fresh clone under a
-different name, because `docker-compose.yml` pins both the Compose project name
-(`name: vshop`) and the volume name (`POSTGRES_VOLUME_NAME`, default
-`vshop_pgdata`). Earlier revisions derived both from the deployment directory,
-which is what caused the catalog to "disappear" after a redeploy — the stack
-silently created a new, empty volume, migrations applied cleanly to it, and the
-bot started healthy with nothing in it.
+different name, because `docker-compose.yml` pins the Compose project name
+(`name: vshop`) and takes the database from the `external` volume named by
+`POSTGRES_VOLUME_NAME`, which Compose never creates or deletes. Earlier revisions
+derived the volume from the deployment directory, or fell back to a default
+name — which is what caused the catalog to "disappear" after a redeploy: the
+stack silently created a new, empty volume, migrations applied cleanly to it,
+and the bot started healthy with nothing in it. Now a missing or wrong name
+stops the deploy with an error, and nothing is created.
 
 ### Verifying a deploy
 
@@ -164,7 +183,11 @@ their statuses, historical totals, and the rendered statistics dashboard. Its
   explain, ledger rows whose running balance is wrong, stamp-card rewards
   without their debit, spin grants out of step with their spins, spins whose
   prize is missing or does not match what was won, referral bonuses booked
-  before their referral qualified. The bot never
+  before their referral qualified — and every loyalty row read against the
+  order it names: purchase stamps or milestone spins on an order that is not
+  the customer's own qualifying purchase, a used reward on another customer's
+  order, a used free bottle without its €0 line, a referral qualified by an
+  order that does not qualify. The bot never
   produces any of these, so every value must be `0`; anything else means rows
   were changed outside it, and the ledger is the record to trust.
 - `coverage` — users without a loyalty account or welcome spin. Accounts are
@@ -200,8 +223,9 @@ rendering (`python -m app.verify_deployment`).
 | `docker compose build --no-cache` + `up -d` | **Preserved** |
 | New application image (code change) deployed | **Preserved** |
 | `alembic upgrade head` | **Preserved** |
-| Redeploy from a **different directory** or a fresh clone | **Preserved** — the project and volume names are pinned in `docker-compose.yml` |
-| `docker compose down -v` | **DESTROYED** |
+| Redeploy from a **different directory** or a fresh clone | **Preserved** — the project name is pinned and the volume is the one `.env` names |
+| Deploy with `POSTGRES_VOLUME_NAME` unset or naming a missing volume | **Refused** — `docker compose up` errors and creates nothing |
+| `docker compose down -v` | Never run it — see [Destructive operations](#destructive-operations) |
 | `docker volume rm` / `docker volume prune` | **DESTROYED** |
 | `docker system prune -a --volumes` | **DESTROYED** |
 | `alembic downgrade` past an index-only migration | **Columns dropped** — see [Migrations](#migrations) |
@@ -237,7 +261,7 @@ docker exec vshop-db dropdb -U vshop restore_check
 
 | Command | Effect |
 |---|---|
-| `docker compose down -v` | **Deletes the database volume.** All users, catalog, carts and order history are gone. |
+| `docker compose down -v` | Deletes the volumes Compose created. The database volume has been `external` since the loyalty release, so Compose leaves it alone — but on any older checkout this **deletes the database volume**: all users, catalog, carts and order history. Never use it. |
 | `docker volume rm <name>` | Same, targeted at one volume. |
 | `docker volume prune` | Deletes **every** unreferenced volume on the host. `docker compose down` leaves the database volume unreferenced, so this destroys it. |
 | `docker system prune -a --volumes` | As above, plus images. |
@@ -468,6 +492,10 @@ discards the existing database — see [Destructive operations](#destructive-ope
 - [ ] `system_identifier` recorded, so it can be compared after each deploy
 - [ ] No `docker volume prune` / `docker system prune --volumes` in any cron or cleanup job
 - [ ] Backups scheduled **and a restore tested**
+- [ ] The release passed the whole test suite with the PostgreSQL suites included —
+  `VSHOP_TEST_POSTGRES_URL=postgresql+asyncpg://…/vshop_test VSHOP_TEST_NO_SKIPS=1 python -m pytest tests`,
+  against an empty scratch database whose name ends in `_test`, never the production one.
+  Without the URL those suites skip, and they are the only proof that the loyalty locking holds
 - [ ] Single bot instance per token (MemoryStorage FSM is process-local; multiple replicas need Redis FSM storage first)
 
 ## Scaling notes

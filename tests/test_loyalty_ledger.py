@@ -18,7 +18,12 @@ from app.models.enums import (
 from app.models.loyalty import LoyaltyAccount, LoyaltyTransaction
 from app.models.reward import UserReward
 from app.models.user import User
-from app.services.loyalty import InsufficientStampsError, LoyaltyService
+from app.services.loyalty import (
+    InsufficientStampsError,
+    LedgerInvariantError,
+    LoyaltyError,
+    LoyaltyService,
+)
 from app.services.referral import ReferralService
 from tests.factories import make_order, make_user
 
@@ -248,6 +253,22 @@ async def test_an_adjustment_needs_a_reason_and_cannot_overdraw(session: AsyncSe
 
     row = await loyalty.adjust(user.id, amount=3, note="  goodwill  ")
     assert (row.note, row.balance_after) == ("goodwill", 3)
+
+
+async def test_the_ledgers_last_guard_is_a_bug_never_a_refusal(session: AsyncSession) -> None:
+    """
+    A write reaching the ledger without its caller's check — perhaps after another
+    write — must not be a LoyaltyError, which handlers answer as a refusal and commit.
+    """
+    user = await make_user(session, telegram_id=7214)
+    loyalty = LoyaltyService(session)
+    account = await loyalty.lock_account(user.id)
+
+    with pytest.raises(LedgerInvariantError) as raised:
+        await loyalty._append(account, kind=LoyaltyTransactionType.ADJUSTMENT, amount=-1)
+
+    assert not isinstance(raised.value, LoyaltyError)
+    assert await loyalty.balance(user.id) == 0
 
 
 async def test_the_ledger_explains_the_balance(session: AsyncSession) -> None:

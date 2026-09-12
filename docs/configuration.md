@@ -156,7 +156,7 @@ Compose can override DB credentials via:
 | `POSTGRES_USER` | `vshop` | Database user |
 | `POSTGRES_PASSWORD` | `vshop` | Database password |
 | `POSTGRES_PORT` | `5432` | Host port published for Postgres |
-| `POSTGRES_VOLUME_NAME` | `vshop_pgdata` | **Docker volume holding the database.** Set this to your existing volume when upgrading a deployment that predates the pinned name — see [Deployment](deployment.md#upgrading-an-existing-deployment). |
+| `POSTGRES_VOLUME_NAME` | — (**required**) | **Docker volume holding the database.** It must already exist — Compose never creates it (the volume is `external`): `docker volume create vshop_pgdata` for a new deployment, or the name of the volume already holding your data when upgrading — see [Deployment](deployment.md#upgrading-an-existing-deployment). Unset or wrong, `docker compose up` stops with an error. |
 
 The bot service forces:
 
@@ -183,17 +183,21 @@ the first few log lines rather than as missing data.
 
 ## Project and volume naming
 
-`docker-compose.yml` pins both:
+`docker-compose.yml` pins the project and takes the volume from `.env`:
 
 ```yaml
 name: vshop                                        # Compose project
 volumes:
   pgdata:
-    name: ${POSTGRES_VOLUME_NAME:-vshop_pgdata}    # actual Docker volume
+    external: true                                 # Compose never creates or deletes it
+    name: "${POSTGRES_VOLUME_NAME:?…}"             # required, no default
 ```
 
-Without these, Compose derives both from the *directory name*, so deploying the
-same code from `/opt/vshop` and `/opt/V-Shop` uses two different databases.
+Without the project name, Compose derives it from the *directory name*, so
+deploying the same code from `/opt/vshop` and `/opt/V-Shop` would use two
+different stacks. Without a required, external volume name, a redeploy could
+silently create a new, empty volume — the incident that made the catalog
+"disappear" — so an unset or mistyped name now stops `docker compose up`.
 
 ## Example `.env` (local Docker)
 

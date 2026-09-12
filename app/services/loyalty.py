@@ -65,6 +65,17 @@ class AlreadyClaimedError(StaleCardError):
     """The card a claim was made from has already been used to claim a free bottle."""
 
 
+class LedgerInvariantError(RuntimeError):
+    """
+    A ledger write that would take a balance below zero: a bug, never a refusal.
+
+    Every refusal a customer can cause is decided before the first write, so
+    reaching this means a caller skipped that check — possibly after writing
+    something else. It is deliberately not a :class:`LoyaltyError`: nothing may
+    answer it as a refusal and commit; the transaction rolls back.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class LedgerPosting:
     """A ledger row, and whether this call created it (``False``: already booked)."""
@@ -315,11 +326,12 @@ class LoyaltyService:
         Move the cached balance and write its ledger row in a single flush.
 
         The caller holds the account lock and has validated the operation; the
-        check here is the last line before the database's own CHECK.
+        check here is the last line before the database's own CHECK, and raises
+        :class:`LedgerInvariantError` — never a refusal a handler would commit on.
         """
         new_balance = account.stamp_balance + amount
         if new_balance < 0:
-            raise InsufficientStampsError(
+            raise LedgerInvariantError(
                 f"User {account.user_id} has {account.stamp_balance} stamps; cannot apply {amount}"
             )
         account.stamp_balance = new_balance

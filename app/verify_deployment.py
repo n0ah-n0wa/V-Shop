@@ -38,6 +38,8 @@ from app.models.enums import (
     OrderStatus,
     ReferralStatus,
     RewardSource,
+    RewardStatus,
+    RewardType,
     RoulettePrizeType,
     SpinGrantReason,
 )
@@ -114,6 +116,16 @@ async def loyalty_health(session: AsyncSession) -> dict[str, dict[str, int]]:
         UserReward.value == RouletteSpin.prize_value,
     )
 
+    # Stamps, milestone spins, rewards and payouts each name an order. The
+    # database ties the loyalty rows to each other per customer, but not to that
+    # order: it must be the customer's own and, where it earned something, a
+    # qualifying purchase (Completed, placed after launch, charged above €0).
+    qualifying_order = and_(
+        Order.status == OrderStatus.COMPLETED,
+        Order.loyalty_eligible.is_(True),
+        Order.total_price > 0,
+    )
+
     def paid_before_qualifying(referral_id: Any) -> ColumnElement[bool]:
         """A referral bonus whose referral has not qualified: nothing should be paid yet."""
         return and_(
@@ -183,6 +195,64 @@ async def loyalty_health(session: AsyncSession) -> dict[str, dict[str, int]]:
                 select(func.count())
                 .select_from(RouletteSpinGrant)
                 .where(paid_before_qualifying(RouletteSpinGrant.referral_id))
+            ),
+            "purchase_stamps_on_orders_that_do_not_qualify": await count(
+                select(func.count())
+                .select_from(LoyaltyTransaction)
+                .outerjoin(Order, Order.id == LoyaltyTransaction.order_id)
+                .where(
+                    LoyaltyTransaction.kind == LoyaltyTransactionType.PURCHASE,
+                    or_(
+                        Order.id.is_(None),
+                        ~and_(Order.user_id == LoyaltyTransaction.user_id, qualifying_order),
+                    ),
+                )
+            ),
+            "milestone_spins_without_their_purchase": await count(
+                select(func.count())
+                .select_from(RouletteSpinGrant)
+                .where(
+                    RouletteSpinGrant.reason == SpinGrantReason.PURCHASE_MILESTONE,
+                    ~exists().where(
+                        LoyaltyTransaction.kind == LoyaltyTransactionType.PURCHASE,
+                        LoyaltyTransaction.user_id == RouletteSpinGrant.user_id,
+                        LoyaltyTransaction.order_id == RouletteSpinGrant.order_id,
+                    ),
+                )
+            ),
+            "used_rewards_on_another_customers_order": await count(
+                select(func.count())
+                .select_from(UserReward)
+                .outerjoin(Order, Order.id == UserReward.order_id)
+                .where(
+                    UserReward.status == RewardStatus.USED,
+                    or_(Order.id.is_(None), Order.user_id != UserReward.user_id),
+                )
+            ),
+            "free_bottles_without_their_free_line": await count(
+                select(func.count())
+                .select_from(UserReward)
+                .where(
+                    UserReward.status == RewardStatus.USED,
+                    UserReward.kind == RewardType.FREE_BOTTLE,
+                    ~exists().where(
+                        OrderItem.order_id == UserReward.order_id,
+                        OrderItem.product_id == UserReward.redeemed_product_id,
+                        OrderItem.price == 0,
+                    ),
+                )
+            ),
+            "referrals_qualified_by_an_order_that_does_not": await count(
+                select(func.count())
+                .select_from(Referral)
+                .outerjoin(Order, Order.id == Referral.qualifying_order_id)
+                .where(
+                    Referral.status == ReferralStatus.QUALIFIED,
+                    or_(
+                        Order.id.is_(None),
+                        ~and_(Order.user_id == Referral.referred_user_id, qualifying_order),
+                    ),
+                )
             ),
         },
         "coverage": {

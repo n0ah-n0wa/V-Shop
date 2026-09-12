@@ -50,12 +50,16 @@ services:
 
 volumes:
   pgdata:
-    # Pinned explicitly so the database volume never depends on the project or
-    # directory name.
+    # The database volume is EXTERNAL and its name is REQUIRED — there is no
+    # default. Compose therefore never creates it: an unset or mistyped name
+    # stops `docker compose up` with an error, instead of silently starting the
+    # bot against a new, empty database (how the catalog once "disappeared").
+    # Compose never deletes it either, not even with `docker compose down -v`.
     #
-    # UPGRADING AN EXISTING DEPLOYMENT: run `docker volume ls` first. If your
-    # database already lives in a differently named volume (e.g. `v-shop_pgdata`
-    # from a directory called `V-Shop`), set POSTGRES_VOLUME_NAME in `.env` to
-    # that exact name so this stack keeps using it. Do NOT accept the default
-    # until you have checked — that is how existing data gets orphaned.
-    name: ${POSTGRES_VOLUME_NAME:-vshop_pgdata}
+    #   New deployment:      docker volume create vshop_pgdata
+    #                        and POSTGRES_VOLUME_NAME=vshop_pgdata in .env
+    #   Existing deployment: run `docker volume ls` and set POSTGRES_VOLUME_NAME
+    #                        to the volume already holding your data, e.g.
+    #                        v-shop_pgdata. See docs/deployment.md.
+    external: true
+    name: "${POSTGRES_VOLUME_NAME:?set POSTGRES_VOLUME_NAME in .env to the Docker volume holding the database - see docs/deployment.md}"

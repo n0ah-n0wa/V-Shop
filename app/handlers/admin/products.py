@@ -25,6 +25,7 @@ from app.keyboards.admin_products import (
     products_actions_keyboard,
 )
 from app.models.category import Category
+from app.models.product import text_limit
 from app.services.admin import AdminService
 from app.services.localization import LocalizationService
 from app.states.admin import ADMIN_WIZARD_STATES, AddProductStates
@@ -85,20 +86,20 @@ _TEXT_STEPS: dict[Any, tuple[str, Any, str | None]] = {
 def _build_preview(i18n: LocalizationService, data: dict[str, Any]) -> str:
     return i18n.t(
         "admin.product_preview",
-        name_ru=data["name_ru"],
-        name_en=data["name_en"],
-        name_de=data["name_de"],
-        description_ru=data["description_ru"],
-        description_en=data["description_en"],
-        description_de=data["description_de"],
-        name_uk=data["name_uk"],
-        description_uk=data["description_uk"],
-        category=data.get("category_name", data["category_id"]),
-        subcategory=data.get("subcategory_name", "—"),
-        flavor=data["flavor"],
-        volume=data["volume"],
-        nicotine=data["nicotine_strength"],
-        price=data["price"],
+        name_ru=e(data["name_ru"]),
+        name_en=e(data["name_en"]),
+        name_de=e(data["name_de"]),
+        description_ru=e(data["description_ru"]),
+        description_en=e(data["description_en"]),
+        description_de=e(data["description_de"]),
+        name_uk=e(data["name_uk"]),
+        description_uk=e(data["description_uk"]),
+        category=e(data.get("category_name", data["category_id"])),
+        subcategory=e(data.get("subcategory_name", "—")),
+        flavor=e(data["flavor"]),
+        volume=e(data["volume"]),
+        nicotine=e(data["nicotine_strength"]),
+        price=e(data["price"]),
     )
 
 
@@ -315,6 +316,13 @@ async def process_text_step(
     if value is None:
         await message.answer(
             i18n.t("admin.product_text_invalid"),
+            reply_markup=admin_cancel_keyboard(i18n),
+        )
+        return
+    limit = text_limit(data_key)
+    if limit is not None and len(value) > limit:
+        await message.answer(
+            i18n.t("admin.product_text_too_long", limit=limit),
             reply_markup=admin_cancel_keyboard(i18n),
         )
         return

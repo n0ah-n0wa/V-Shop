@@ -76,3 +76,14 @@ class Product(Base, TimestampMixin, UpdatedAtMixin):
 
     def __repr__(self) -> str:
         return f"<Product id={self.id} name_en={self.name_en!r}>"
+
+
+def text_limit(field: str) -> int | None:
+    """
+    The most characters ``Product.<field>`` holds — ``None`` for unbounded text.
+
+    PostgreSQL refuses a longer value outright, while SQLite, which the tests
+    run on, stores it; the admin wizards check against this before saving.
+    """
+    length = getattr(Product.__table__.c[field].type, "length", None)
+    return length if isinstance(length, int) else None

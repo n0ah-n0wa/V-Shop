@@ -33,6 +33,7 @@ from app.services.order import (
     OrderService,
     delivery_allowed_for_city,
 )
+from app.utils import concurrency
 from app.utils.concurrency import keyed_lock
 from app.utils.labels import delivery_label, payment_label
 from tests.factories import make_category, make_product, make_user
@@ -275,6 +276,64 @@ async def test_different_users_are_not_blocked_by_each_other() -> None:
     # interleaved proves they did not serialize on each other
     assert running.index("1-enter") < running.index("2-exit")
     assert running.index("2-enter") < running.index("1-exit")
+
+
+@pytest.mark.asyncio
+async def test_pruning_the_registry_never_splits_a_lock_in_handover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A lock reads as unlocked between its release and its next waiter waking. Pruning
+    it then — the registry full of other customers' keys — handed the next tap a fresh
+    lock while the waiter entered the old one: two holders of one key at once.
+    """
+    monkeypatch.setattr(concurrency, "_locks", {})
+    monkeypatch.setattr(concurrency, "_users", {}, raising=False)
+    monkeypatch.setattr(concurrency, "_MAX_LOCKS", 4)  # 2048 in production
+    key = "roulette:42"
+    inside: set[str] = set()
+    seen: list[set[str]] = []
+    release_first, release_second, second_inside = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def first() -> None:
+        async with keyed_lock(key):
+            inside.add("first")
+            await release_first.wait()
+            inside.discard("first")
+        # The same tick as the release, before the queued second tap runs: another
+        # customer's first tap registers a new key, and the full registry prunes.
+        async with keyed_lock("checkout:7"):
+            pass
+
+    async def second() -> None:
+        async with keyed_lock(key):
+            inside.add("second")
+            seen.append(set(inside))
+            second_inside.set()
+            await release_second.wait()
+            inside.discard("second")
+
+    async def third() -> None:
+        async with keyed_lock(key):
+            seen.append(inside | {"third"})
+
+    holder = asyncio.create_task(first())
+    await asyncio.sleep(0)
+    for other in ("f1", "f2", "f3"):  # other customers fill the registry
+        async with keyed_lock(other):
+            pass
+    waiter = asyncio.create_task(second())
+    await asyncio.sleep(0)
+    release_first.set()
+    await holder
+    await second_inside.wait()
+    latecomer = asyncio.create_task(third())
+    await asyncio.sleep(0)
+    release_second.set()
+    await asyncio.gather(waiter, latecomer)
+
+    assert seen == [{"second"}, {"third"}], "two taps held one customer's lock at once"
+    assert concurrency._users == {}, "every holder and waiter was counted out"
 
 
 @pytest.mark.asyncio

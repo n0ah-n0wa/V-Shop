@@ -18,12 +18,13 @@ from datetime import UTC, datetime
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import OrderStatus, ReferralStatus
+from app.models.enums import ReferralStatus
 from app.models.referral import Referral
 from app.repositories.loyalty_account import LoyaltyAccountRepository
 from app.repositories.order import OrderRepository
 from app.repositories.referral import ReferralRepository
 from app.services.loyalty import LoyaltyError, LoyaltyService
+from app.services.stamp_card import is_qualifying_purchase
 
 # 9 random bytes -> 12 URL-safe characters: fits Telegram's 64-character
 # /start payload with room to spare, and is not guessable like a user id.
@@ -224,11 +225,7 @@ class ReferralService:
             raise ValueError(
                 f"Order {order_id} is not an order of referred user {referral.referred_user_id}"
             )
-        if (
-            order.status != OrderStatus.COMPLETED
-            or not order.loyalty_eligible
-            or order.total_price <= 0
-        ):
+        if not is_qualifying_purchase(order):
             raise ValueError(f"Order {order_id} is not a completed, paid order placed after launch")
         if referral.status == ReferralStatus.QUALIFIED:
             return False

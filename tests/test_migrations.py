@@ -6,8 +6,10 @@ suite runs — the full audit needs a real PostgreSQL (see
 ``docs/database-schema.md``), but the rules that matter most are the ones a
 reviewer could miss and a test can hold permanently:
 
-* an upgrade must never drop a table, a column or a constraint;
-* raw SQL in an upgrade must add or amend data, never remove it;
+* an upgrade must never drop a table, a column or a constraint — nor may any
+  helper it calls, whatever it calls the drop on (``op``, ``batch_op``);
+* raw SQL in an upgrade must add or amend data, never remove it, and must be a
+  literal this file can read (through ``sa.text``, a connection, a constant);
 * the chain must stay linear and single-headed;
 * a new model must arrive with the migration that creates its table.
 """
@@ -34,6 +36,10 @@ DESTRUCTIVE_SQL = re.compile(
     r"\b(DROP\s+(TABLE|COLUMN|SCHEMA|DATABASE|CONSTRAINT)|TRUNCATE|DELETE\s+FROM)\b",
     re.IGNORECASE,
 )
+# The calls that send raw SQL, whatever they are called on.
+EXECUTE_METHODS = {"execute", "exec_driver_sql"}
+# What raw SQL in an upgrade may do: add rows, amend them, add schema.
+ALLOWED_SQL_VERBS = {"INSERT", "UPDATE", "ALTER", "CREATE"}
 
 # Dropping an index destroys no data and is reversible, so it is allowed — but
 # only where someone decided to, not by accident. Each entry is (revision, index)
@@ -98,6 +104,97 @@ def first_string_arg(call: ast.Call) -> str:
     return ""
 
 
+def method_calls(scope: ast.AST) -> list[tuple[str, ast.Call]]:
+    """Every ``<anything>.<method>(...)`` call — on ``op``, ``batch_op`` or a connection."""
+    return [
+        (node.func.attr, node)
+        for node in ast.walk(scope)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    ]
+
+
+def upgrade_scopes(tree: ast.Module) -> list[ast.FunctionDef]:
+    """``upgrade()`` and every module-level function it calls, however indirectly."""
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    found: dict[str, ast.FunctionDef] = {}
+    pending = ["upgrade"]
+    while pending:
+        name = pending.pop()
+        if name in found or name not in functions:
+            continue
+        found[name] = functions[name]
+        pending.extend(
+            node.func.id
+            for node in ast.walk(functions[name])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        )
+    return list(found.values())
+
+
+def module_strings(tree: ast.Module) -> dict[str, str]:
+    """Module-level string constants — where a migration may keep its SQL."""
+    strings: dict[str, str] = {}
+    for node in tree.body:
+        value = getattr(node, "value", None)
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [getattr(node, "target", None)]
+        strings.update({t.id: value.value for t in targets if isinstance(t, ast.Name)})
+    return strings
+
+
+def text_names(tree: ast.Module) -> set[str]:
+    """``text``, and whatever name the migration imported it under."""
+    names = {"text"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("sqlalchemy"):
+            names |= {alias.asname for alias in node.names if alias.name == "text" and alias.asname}
+    return names
+
+
+def literal_sql(node: ast.expr, strings: dict[str, str], texts: set[str]) -> str | None:
+    """The SQL an ``execute`` argument holds — ``None`` when it is not a readable literal."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return strings.get(node.id)
+    if isinstance(node, ast.Call) and node.args:
+        func = node.func
+        callee = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if callee in texts:
+            return literal_sql(node.args[0], strings, texts)
+    return None
+
+
+def schema_drops(tree: ast.Module) -> list[str]:
+    """Each drop of a table, column or constraint that ``upgrade()`` can reach."""
+    return [
+        f"line {call.lineno}: .{name}({first_string_arg(call)!r})"
+        for scope in upgrade_scopes(tree)
+        for name, call in method_calls(scope)
+        if name in DESTRUCTIVE_OPS
+    ]
+
+
+def raw_sql_problems(tree: ast.Module) -> list[str]:
+    """Raw SQL ``upgrade()`` can reach that removes data — or that cannot be read here."""
+    strings, texts = module_strings(tree), text_names(tree)
+    problems: list[str] = []
+    for scope in upgrade_scopes(tree):
+        for name, call in method_calls(scope):
+            if name not in EXECUTE_METHODS:
+                continue
+            sql = literal_sql(call.args[0], strings, texts) if call.args else None
+            if sql is None:
+                problems.append(f"line {call.lineno}: SQL this check cannot read")
+                continue
+            statement = " ".join(sql.split())
+            verb = statement.split()[0].upper() if statement else ""
+            if DESTRUCTIVE_SQL.search(statement) or verb not in ALLOWED_SQL_VERBS:
+                problems.append(f"line {call.lineno}: {statement[:120]}")
+    return problems
+
+
 def test_there_is_at_least_one_migration() -> None:
     assert migration_files(), "no migrations found — is the path right?"
 
@@ -110,14 +207,10 @@ def test_no_upgrade_destroys_schema_or_data(path: pathlib.Path) -> None:
     A column dropped here takes its data with it, and the deploy that runs it is
     the moment the old rows stop existing.
     """
-    upgrade = function(parse(path), "upgrade")
-    assert upgrade is not None, f"{path.name} has no upgrade()"
+    tree = parse(path)
+    assert function(tree, "upgrade") is not None, f"{path.name} has no upgrade()"
 
-    offenders = [
-        f"line {call.lineno}: op.{op}({first_string_arg(call)!r})"
-        for op, call in op_calls(upgrade)
-        if op in DESTRUCTIVE_OPS
-    ]
+    offenders = schema_drops(tree)
     assert offenders == [], (
         f"{path.name} destroys schema in upgrade(): {offenders}. "
         "Removal belongs in its own contract migration, once nothing reads the "
@@ -127,21 +220,12 @@ def test_no_upgrade_destroys_schema_or_data(path: pathlib.Path) -> None:
 
 @pytest.mark.parametrize("path", migration_files(), ids=lambda p: p.stem.split("_")[0])
 def test_raw_sql_in_an_upgrade_never_removes_data(path: pathlib.Path) -> None:
-    """``op.execute`` bypasses every other guard here, so it gets its own."""
-    upgrade = function(parse(path), "upgrade")
-    assert upgrade is not None
+    """Raw SQL bypasses every other guard here, so it gets its own."""
+    tree = parse(path)
+    assert function(tree, "upgrade") is not None
 
-    for op, call in op_calls(upgrade):
-        if op != "execute":
-            continue
-        sql = " ".join(first_string_arg(call).split())
-        assert not DESTRUCTIVE_SQL.search(sql), (
-            f"{path.name} line {call.lineno}: destructive raw SQL: {sql[:120]}"
-        )
-        verb = sql.split()[0].upper() if sql else ""
-        assert verb in {"INSERT", "UPDATE", "", "ALTER", "CREATE"}, (
-            f"{path.name} line {call.lineno}: unexpected statement {verb}: {sql[:120]}"
-        )
+    problems = raw_sql_problems(tree)
+    assert problems == [], f"{path.name}: raw SQL that removes data or cannot be read: {problems}"
 
 
 @pytest.mark.parametrize("path", migration_files(), ids=lambda p: p.stem.split("_")[0])
@@ -155,10 +239,14 @@ def test_index_drops_in_an_upgrade_are_deliberate(path: pathlib.Path) -> None:
     """
     tree = parse(path)
     revision = assigned_string(tree, "revision") or path.stem.split("_")[0]
-    upgrade = function(tree, "upgrade")
-    assert upgrade is not None
+    assert function(tree, "upgrade") is not None
 
-    dropped = {first_string_arg(call) for op, call in op_calls(upgrade) if op == "drop_index"}
+    dropped = {
+        first_string_arg(call)
+        for scope in upgrade_scopes(tree)
+        for name, call in method_calls(scope)
+        if name == "drop_index"
+    }
     undeclared = {name for name in dropped if (revision, name) not in ALLOWED_INDEX_DROPS}
     assert undeclared == set(), (
         f"{path.name} drops {sorted(undeclared)} in upgrade(). If that is "
@@ -232,3 +320,38 @@ def test_every_model_table_is_created_by_a_migration() -> None:
     modelled = set(Base.metadata.tables)
     missing = sorted(modelled - created)
     assert not missing, f"these tables exist in the models but no migration creates them: {missing}"
+
+
+# The guards above read source, so each way of hiding a removal from them is
+# pinned here: a migration written like any of these must fail them.
+HIDDEN_REMOVALS = {
+    "batch": (
+        "def upgrade():\n"
+        "    with op.batch_alter_table('orders') as batch_op:\n"
+        "        batch_op.drop_column('city')\n"
+    ),
+    "helper": "def _tidy():\n    op.drop_table('orders')\n\n\ndef upgrade():\n    _tidy()\n",
+    "text": "def upgrade():\n    op.execute(sa.text('DROP TABLE orders'))\n",
+    "connection": "def upgrade():\n    op.get_bind().execute(sa.text('DELETE FROM orders'))\n",
+    "constant": "_SQL = 'TRUNCATE orders'\n\n\ndef upgrade():\n    op.execute(_SQL)\n",
+    "alias": (
+        "from sqlalchemy import text as sql\n\n\n"
+        "def upgrade():\n    op.execute(sql('DELETE FROM orders'))\n"
+    ),
+    "unreadable": "def upgrade():\n    op.execute(statement())\n",
+}
+
+
+@pytest.mark.parametrize("source", HIDDEN_REMOVALS.values(), ids=list(HIDDEN_REMOVALS))
+def test_the_guards_see_through_indirection(source: str) -> None:
+    tree = ast.parse(source)
+    assert schema_drops(tree) + raw_sql_problems(tree), "a removal got past the guards"
+
+
+def test_the_guards_let_an_expanding_migration_through() -> None:
+    tree = ast.parse(
+        "def upgrade():\n"
+        "    op.add_column('orders', sa.Column('note', sa.Text()))\n"
+        "    op.get_bind().execute(sa.text(\"UPDATE orders SET note = ''\"))\n"
+    )
+    assert schema_drops(tree) + raw_sql_problems(tree) == []

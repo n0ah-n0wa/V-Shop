@@ -6,7 +6,7 @@ V-Shop is a layered Telegram bot:
 
 ```text
 Telegram update
-    → Middlewares (log → errors → DB session → i18n)
+    → Middlewares (log → private chat → errors → DB session → i18n)
     → Routers (user | admin)
     → Handlers
     → Services

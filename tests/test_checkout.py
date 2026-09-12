@@ -196,4 +196,4 @@ def test_build_checkout_summary_contains_core_fields() -> None:
     assert "Alice" in text
     assert "Berlin St" in text
     assert "Test Juice" in text
-    assert "10.00" in text or "10" in text
+    assert i18n.t("checkout.summary_total", total=Decimal("10.00")) in text

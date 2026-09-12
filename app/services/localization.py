@@ -42,19 +42,24 @@ class LocalizationService:
     def set_language(self, language: LanguageCode | str | None) -> None:
         self._language = normalize_language(language)
 
-    def get(self, key: str, **kwargs: object) -> str:
+    def get(self, key: str, /, **kwargs: object) -> str:
         """Alias for :meth:`t`."""
         return self.t(key, **kwargs)
 
-    def t(self, key: str, **kwargs: object) -> str:
-        """Translate a key using the current language."""
+    def t(self, key: str, /, **kwargs: object) -> str:
+        """
+        Translate a key using the current language.
+
+        ``key`` is positional-only: every keyword is a placeholder, whatever its
+        name (``{language}`` names the language an admin is editing).
+        """
         return translate(key, self._language, **kwargs)
 
     def n(self, *parts: str) -> str:
         """Join dotted key parts then translate (``i18n.n('menu', 'catalog')``)."""
         return self.t(".".join(parts))
 
-    def plural(self, key: str, count: int, **kwargs: object) -> str:
+    def plural(self, key: str, count: int, /, **kwargs: object) -> str:
         """
         The form of ``key`` that fits ``count`` in this language, ``{count}`` filled in.
 

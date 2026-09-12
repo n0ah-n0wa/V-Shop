@@ -22,8 +22,19 @@ cp .env.example .env
 - `BOT_TOKEN` — real bot token (not the placeholder)
 - `ADMIN_IDS` — your Telegram numeric user ID
 - `MANAGER_CHAT_ID` — chat that receives new-order alerts (can be the same as your user ID)
+- `POSTGRES_VOLUME_NAME` — the Docker volume that holds the database (next step)
 
-4. Build and start:
+4. Create the database volume. Compose never creates it: an unset or wrong
+   `POSTGRES_VOLUME_NAME` stops the start instead of opening an empty database.
+   Upgrading an existing deployment? Name the volume you already have instead —
+   see [Deployment](deployment.md#upgrading-an-existing-deployment).
+
+```bash
+docker volume create vshop_pgdata
+echo "POSTGRES_VOLUME_NAME=vshop_pgdata" >> .env
+```
+
+5. Build and start:
 
 ```bash
 docker compose up --build
@@ -36,7 +47,8 @@ This starts:
 
 Logs appear in the Compose output. Stop with `Ctrl+C` or `docker compose down`.
 
-Data persists in the `pgdata` Docker volume.
+Data persists in the Docker volume named by `POSTGRES_VOLUME_NAME`; Compose never
+removes it, not even with `docker compose down -v`.
 
 ## Option B — Local virtualenv
 
@@ -71,7 +83,8 @@ Set `DATABASE_URL` for a reachable Postgres, for example:
 DATABASE_URL=postgresql+asyncpg://vshop:vshop@localhost:5432/vshop
 ```
 
-You can run only the database via Compose:
+You can run only the database via Compose (with `POSTGRES_VOLUME_NAME` set and
+its volume created, as in Option A step 4):
 
 ```bash
 docker compose up -d db

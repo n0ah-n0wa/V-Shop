@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.models.enums import OrderStatus, RewardType
 from app.models.loyalty import LoyaltyTransaction
+from app.models.order import Order
 from app.models.reward import UserReward
 from app.repositories.order import OrderRepository
 from app.repositories.user_reward import UserRewardRepository
@@ -85,6 +86,28 @@ class PurchaseAwardStatus(StrEnum):
     NOT_COMPLETED = "not_completed"
     NOT_ELIGIBLE = "not_eligible"  # placed before the programme launched
     NOT_PAID = "not_paid"  # charged nothing, e.g. only a free bottle: not a purchase
+
+
+def purchase_disqualification(order: Order) -> PurchaseAwardStatus | None:
+    """
+    Why ``order`` is not a qualifying purchase — ``None`` when it is.
+
+    The owner's rule, in one place: an order counts once it is Completed, was
+    placed after the programme launched (``loyalty_eligible``) and was charged
+    more than €0. Stamps, the milestone spins numbered from them, and referral
+    payouts all ask this one function.
+    """
+    if order.status != OrderStatus.COMPLETED:
+        return PurchaseAwardStatus.NOT_COMPLETED
+    if not order.loyalty_eligible:
+        return PurchaseAwardStatus.NOT_ELIGIBLE
+    if order.total_price <= 0:
+        return PurchaseAwardStatus.NOT_PAID
+    return None
+
+
+def is_qualifying_purchase(order: Order) -> bool:
+    return purchase_disqualification(order) is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,12 +190,9 @@ class StampCardService:
         order = await self.orders.get_for_update(order_id)
         if order is None:
             raise LookupError(f"Order {order_id} does not exist")
-        if order.status != OrderStatus.COMPLETED:
-            return PurchaseAward(PurchaseAwardStatus.NOT_COMPLETED, order.id)
-        if not order.loyalty_eligible:
-            return PurchaseAward(PurchaseAwardStatus.NOT_ELIGIBLE, order.id)
-        if order.total_price <= 0:
-            return PurchaseAward(PurchaseAwardStatus.NOT_PAID, order.id)
+        refusal = purchase_disqualification(order)
+        if refusal is not None:
+            return PurchaseAward(refusal, order.id)
 
         stamps = self.policy.stamps_for(order.total_price)
         posting = await self.loyalty.record_purchase(

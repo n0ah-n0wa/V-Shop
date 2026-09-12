@@ -72,12 +72,17 @@ catalog, orders, statistics and broadcasts — from inside Telegram.
 
 ```bash
 cp .env.example .env
-# Set BOT_TOKEN, ADMIN_IDS, MANAGER_CHAT_ID
+# Set BOT_TOKEN, ADMIN_IDS, MANAGER_CHAT_ID — and name the database volume
+# (upgrading an existing deployment? see docs/deployment.md first):
+docker volume create vshop_pgdata
+echo "POSTGRES_VOLUME_NAME=vshop_pgdata" >> .env
 
 docker compose up --build
 ```
 
-Compose starts PostgreSQL, runs `alembic upgrade head`, then launches the bot.
+Compose starts PostgreSQL, runs `alembic upgrade head`, then launches the bot. It
+never creates the database volume itself: an unset or wrong `POSTGRES_VOLUME_NAME`
+stops the start instead of opening an empty database.
 
 ## Development
 
